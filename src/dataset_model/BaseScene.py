@@ -10,3 +10,5 @@ class BaseScene:
         self.depth_mask: np.ndarray = None
         self.K: np.ndarray = None
         self.c2w: np.ndarray = None
+        self.pointcloud_path: str = None
+        self.calib_path: str = None

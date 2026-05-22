@@ -37,6 +37,8 @@ We release the source code for the refinement interface at https://github.com/UV
 
 📖 **[COCO Pipeline Guide](docs/COCO_PIPELINE.md)** - Run the pipeline on COCO dataset
 
+📡 **[LiDAR Input Guide](docs/LIDAR_INPUT.md)** - Use world-frame LiDAR + calibration instead of MoGe/DepthPro for the depth step
+
 🔧 **[OVMono3D Fine-tuning](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D/tree/ovmono3d_finetune)** - Code for fine-tuning OVMono3D on LabelAny3D pseudo annotations
 
 ## Citing

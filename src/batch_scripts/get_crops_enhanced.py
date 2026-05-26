@@ -14,8 +14,7 @@ from PIL import Image
 from util import read_bounding_boxes_segmentations, crop_object
 from scipy.ndimage import binary_opening
 from detectron2.structures import BoxMode
-from batch_scripts.coconut_loader import CoconutLoader, get_dataset_paths
-from batch_scripts.py123d_loader import Py123dOutputLoader
+from batch_scripts.pipeline_loader import setup_pipeline_loop
 
 
 if __name__ == "__main__":
@@ -24,7 +23,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", help="path to the yaml config file", default='configs/image.yaml', type=str)
     parser.add_argument('--gpu_idx', type=int, default=0, help='GPU index')
     parser.add_argument('--start_index', type=int, default=0, help='Object index to start processing')
-    parser.add_argument('--end_index', type=int, default=1, help='Object index to end processing')
+    parser.add_argument('--end_index', type=int, default=-1, help='Object index to end processing (-1 = all)')
     parser.add_argument("--split", help="split", default="val", type=str)
     parser.add_argument("--save_dir", help="save directory", default="../experimental_results/COCO/", type=str)
     parser.add_argument(
@@ -37,42 +36,21 @@ if __name__ == "__main__":
     args, extras = parser.parse_known_args()
     opt = OmegaConf.merge(OmegaConf.load(args.config), OmegaConf.from_cli(extras))
 
-    data_backend = args.data_backend or opt.run.get("data_backend", "coco")
-    end_index = None if args.end_index < 0 else args.end_index
+    data_backend, split, loader, indices = setup_pipeline_loop(
+        args,
+        opt,
+        require_files=("input.png",),
+        require_annotations=True,
+    )
     crop_size = 512
 
-    if data_backend == "py123d":
-        split = args.split
-        if split == "val":
-            py_cfg = opt.run.get("py123d", {})
-            split = f"{py_cfg.get('dataset', 'nuscenes')}_{py_cfg.get('split_type', 'val')}"
-        loader = Py123dOutputLoader(args.save_dir, split)
-        indices = range(args.start_index, end_index if end_index is not None else len(loader))
-    else:
-        dataset_root, annotations_dir = get_dataset_paths(args.split)
-        loader = CoconutLoader(split=args.split, annotations_dir=annotations_dir)
-        indices = range(args.start_index, end_index if end_index is not None else len(loader))
-
     for i in tqdm(indices):
-        if data_backend == "py123d":
-            scene_entry = loader.get_scene_by_index(i)
-            output_dir = scene_entry["scene_dir"]
-            opt.scene.attributes.img_path = scene_entry["image_path"]
-            scene = get_scene(opt.scene.type, opt.scene.attributes)
-            annotations = scene_entry["annotations"]
-            img_name = scene_entry["file_name"]
-        else:
-            image_info = loader.get_image_by_index(i)
-            img_name = image_info["file_name"]
-            image_id = image_info["id"]
-            image_path = os.path.join(dataset_root, img_name)
-            output_dir = os.path.join(
-                args.save_dir, args.split,
-                img_name.split(".")[0].replace("/", "_").replace("-", "_"),
-            )
-            opt.scene.attributes.img_path = image_path
-            scene = get_scene(opt.scene.type, opt.scene.attributes)
-            annotations = loader.get_annotations(image_id)
+        scene_entry = loader.get_scene_by_index(i)
+        output_dir = scene_entry["scene_dir"]
+        opt.scene.attributes.img_path = scene_entry["image_path"]
+        scene = get_scene(opt.scene.type, opt.scene.attributes)
+        annotations = scene_entry["annotations"]
+        img_name = scene_entry["file_name"]
 
         out_dir = Path(output_dir)
         print(f"Saving to {out_dir}")
@@ -97,28 +75,29 @@ if __name__ == "__main__":
         scaled_masks = []
         for mask in masks:
             mask = mask.astype(np.uint8)
-            # Define new dimensions (width * 4, height * 4)
             new_size = (mask.shape[1] * 4, mask.shape[0] * 4)
-            # Resize using nearest-neighbor interpolation
             scaled_mask = cv2.resize(mask, new_size, interpolation=cv2.INTER_NEAREST)
             scaled_masks.append(scaled_mask)
         masks = np.array(scaled_masks)
 
-        enhanced_image = Image.open(out_dir / 'enhanced' / 'input.png')
-        scene.image_pil = enhanced_image.convert('RGB')
+        enhanced_path = out_dir / "enhanced" / "input.png"
+        if not enhanced_path.exists():
+            print(f"Missing {enhanced_path}; run enhance.py first")
+            continue
+        enhanced_image = Image.open(enhanced_path)
+        scene.image_pil = enhanced_image.convert("RGB")
         scene.image_np = np.array(enhanced_image)
-        image_size = scene.image_pil.size
         selected_bboxes = []
-        for i in range(len(masks[object_ids]) - 1, -1, -1):
-            label = instance_labels[object_ids[i]]
-            label = label.replace(' (', ', ').replace(')', '')
-            obj_id = f"{i}_{label.replace(' ', '_')}"
+        for j in range(len(masks[object_ids]) - 1, -1, -1):
+            label = instance_labels[object_ids[j]]
+            label = label.replace(" (", ", ").replace(")", "")
+            obj_id = f"{j}_{label.replace(' ', '_')}"
 
-            mask = binary_opening(masks[object_ids][i], np.ones((7, 7)))
+            mask = binary_opening(masks[object_ids][j], np.ones((7, 7)))
             if mask.sum() < 6400:
                 print(f"Skipped too small object: {obj_id}")
                 continue
-            selected_bboxes.append(bboxes[object_ids[i]])
+            selected_bboxes.append(bboxes[object_ids[j]])
             crop_path = out_dir / "crops" / f"{obj_id}_reproj.png"
             crop_params_path = out_dir / "crops" / f"{obj_id}_crop_params.npy"
             if not crop_path.exists() or not crop_params_path.exists():

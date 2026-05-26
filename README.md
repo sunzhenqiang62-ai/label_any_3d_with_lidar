@@ -1,29 +1,3 @@
-<div align="center">
-
-# LabelAny3D: Label Any Object 3D in the Wild
-
-**Fork extension:** LiDAR / py123d depth inputs · easier deployment on driving & custom sensor data
-
-[Jin Yao][jy], [Radowan Mahmud Redoy][rr], [Sebastian Elbaum][se], [Matthew B. Dwyer][md], [Zezhou Cheng][zc]
-
-[![Website](https://img.shields.io/badge/Project-Page-b361ff)](https://uva-computer-vision-lab.github.io/LabelAny3D/)
-[![Paper](https://img.shields.io/badge/arXiv-PDF-b31b1b)](https://openreview.net/pdf?id=Q2fU0JDHuW)
-[![Upstream](https://img.shields.io/badge/Upstream-UVA_LabelAny3D-blue)](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D)
-
-</div>
-
-<table style="border-collapse: collapse; border: none;">
-<tr>
-    <td width="100%">
-        <p align="center">
-            Samples from COCO3D dataset
-            <img src=".github/LA3D.png" alt="COCO3D samples"/ height="300">
-        </p>
-    </td>
-</tr>
-</table>
-
----
 
 ## What changed in this fork
 
@@ -49,8 +23,14 @@ src/batch_scripts/py123d_loader.py
 src/integrations/py123d/              # nuScenes adapter (coord, annotations, loader)
 src/configs/lidar.yaml
 src/configs/py123d_nuscenes.yaml
+src/configs/py123d_nuscenes_smoke.yaml
+src/batch_scripts/pipeline_loader.py
+src/batch_scripts/run_nuscenes.py
+src/tools/visualize_scene.py
 docs/LIDAR_INPUT.md
 docs/PY123D_NUSCENES.md
+docs/NUSCENES_EXPERIMENT.md
+scripts/run_nuscenes.sh
 requirements-py123d.txt                # optional: pip install -r requirements-py123d.txt
 ```
 
@@ -83,30 +63,25 @@ python batch_scripts/depth.py \
   --start_index 0 --end_index -1
 ```
 
-**2. py123d nuScenes**
+**2. py123d nuScenes (one command)**
 
 ```bash
 pip install -r requirements-py123d.txt
 export PY123D_DATA_ROOT=/path/to/py123d_data
 
-python batch_scripts/depth.py \
-  --depth_source py123d \
-  --config configs/py123d_nuscenes.yaml \
-  --save_dir ../experimental_results/nuScenes/ \
-  --end_index -1
-
-python batch_scripts/get_crops_enhanced.py \
-  --data_backend py123d \
-  --config configs/py123d_nuscenes.yaml \
-  --split nuscenes_val \
-  --end_index -1
+cd src
+python batch_scripts/run_nuscenes.py --preset smoke --skip_existing --visualize after_depth
 ```
 
-**3. Continue the standard pipeline** (same `--save_dir` and split):
+**3. Visualization**
 
-`enhance.py` → `get_crops_enhanced.py` (if not using py123d crops) → `completion.py` → `elevation.py` → `reconstruction.py` → `whole.py`
+```bash
+python tools/visualize_scene.py --root ../experimental_results/nuScenes/nuscenes_val --mode compose
+```
 
-Details: [COCO Pipeline](docs/COCO_PIPELINE.md) · [LiDAR](docs/LIDAR_INPUT.md) · [py123d nuScenes](docs/PY123D_NUSCENES.md)
+Pipeline order: `depth` → `enhance` → `crops` → `completion` → `elevation` → `reconstruction` → `whole`. All nuScenes steps use `--data_backend py123d`.
+
+Details: [nuScenes experiment](docs/NUSCENES_EXPERIMENT.md) · [COCO Pipeline](docs/COCO_PIPELINE.md) · [LiDAR](docs/LIDAR_INPUT.md) · [py123d nuScenes](docs/PY123D_NUSCENES.md)
 
 ---
 
@@ -118,6 +93,7 @@ Details: [COCO Pipeline](docs/COCO_PIPELINE.md) · [LiDAR](docs/LIDAR_INPUT.md) 
 | [COCO_PIPELINE.md](docs/COCO_PIPELINE.md) | Original 8-step COCO pipeline |
 | [LIDAR_INPUT.md](docs/LIDAR_INPUT.md) | Manifest format, calib JSON, coordinate frames |
 | [PY123D_NUSCENES.md](docs/PY123D_NUSCENES.md) | `PY123D_DATA_ROOT`, conversion, py123d CLI |
+| [NUSCENES_EXPERIMENT.md](docs/NUSCENES_EXPERIMENT.md) | `run_nuscenes.py`, presets, visualization |
 
 ---
 

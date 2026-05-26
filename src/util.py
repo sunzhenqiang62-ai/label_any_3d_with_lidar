@@ -229,19 +229,31 @@ def project_to_2d(point_3d, camera_matrix):
     return point_2d_homogeneous[:2] / point_2d_homogeneous[2]
 
 
-def draw_cube(scene_dir, is_ground=False):
-    # Load camera parameters
-    with open(os.path.join(scene_dir, "cam_params.json"), 'r') as json_file:
+def render_bbox_overlay(
+    scene_dir,
+    is_ground=False,
+    image_path=None,
+    bbox_file=None,
+):
+    """
+    Draw 3D bbox wireframes on the scene RGB image.
+
+    Returns:
+        BGR image as numpy array (uint8).
+    """
+    scene_dir = str(scene_dir)
+    with open(os.path.join(scene_dir, "cam_params.json"), "r") as json_file:
         cam_param = json.load(json_file)
     K = np.array(cam_param["K"])
 
-    # Load appropriate bbox file based on is_ground flag
-    bbox_file = "3dbbox_ground.json" if is_ground else "3dbbox.json"
-    with open(os.path.join(scene_dir, bbox_file), 'r') as json_file:
+    if bbox_file is None:
+        bbox_file = "3dbbox_ground.json" if is_ground else "3dbbox.json"
+    with open(os.path.join(scene_dir, bbox_file), "r") as json_file:
         cube_list = json.load(json_file)
 
-    # Load and convert image
-    image = Image.open(os.path.join(scene_dir, "input.png"))
+    if image_path is None:
+        image_path = os.path.join(scene_dir, "input.png")
+    image = Image.open(image_path)
     image = np.array(image)
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
     for cube in cube_list:
@@ -281,12 +293,25 @@ def draw_cube(scene_dir, is_ground=False):
 
         # Draw category name
         if topmost_point is not None:
-            text_position = (int(topmost_point[0]), int(topmost_point[1]) - 10)  
-            cv2.putText(image, f'{cube["category_name"]}', text_position, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            text_position = (int(topmost_point[0]), int(topmost_point[1]) - 10)
+            cv2.putText(
+                image,
+                f'{cube["category_name"]}',
+                text_position,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 255),
+                1,
+            )
 
-    # Save output image
-    output_file = 'vis_3dbox.png' if is_ground else 'vis_3dbox_no_ground.png'
+    return image
+
+
+def draw_cube(scene_dir, is_ground=False):
+    image = render_bbox_overlay(scene_dir, is_ground=is_ground)
+    output_file = "vis_3dbox.png" if is_ground else "vis_3dbox_no_ground.png"
     cv2.imwrite(os.path.join(scene_dir, output_file), image)
+
 
 def analyze_mask(mask, image_size, scale_threshold=100, boundary_threshold=10):
     """

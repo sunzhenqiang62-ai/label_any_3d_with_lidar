@@ -313,7 +313,12 @@ def combine_coco_results(results_dir, split, output_path, bbox_filename="3dbbox.
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Combine COCO 3D bbox results into Omni3D format")
-    parser.add_argument("--split", type=str, default="val", choices=["train", "val"], help="Dataset split")
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="val",
+        help="Dataset split folder name (e.g. val, train, nuscenes_val)",
+    )
     parser.add_argument("--results_dir", type=str, default="../experimental_results/COCO", help="Results directory")
     parser.add_argument("--output", type=str, default=None, help="Output JSON path")
     parser.add_argument("--bbox_file", type=str, default="3dbbox.json", help="3D bbox JSON filename")

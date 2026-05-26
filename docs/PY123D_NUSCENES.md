@@ -1,6 +1,8 @@
 # py123d nuScenes Integration
 
-Run LabelAny3D depth (and crops) from [py123d](https://github.com/kesai-labs/py123d) converted nuScenes Arrow logs instead of MoGe/DepthPro and COCONUT.
+Run LabelAny3D depth (and the full pipeline) from [py123d](https://github.com/kesai-labs/py123d) converted nuScenes Arrow logs instead of MoGe/DepthPro and COCONUT.
+
+See also: [NUSCENES_EXPERIMENT.md](NUSCENES_EXPERIMENT.md) for one-command runs and visualization.
 
 ## Install
 
@@ -16,9 +18,15 @@ export PY123D_DATA_ROOT=/path/to/py123d_data
 # py123d-conversion dataset=nuscenes ...
 ```
 
-## Depth step
+## Quick start (full pipeline)
 
 From `src/`:
+
+```bash
+python batch_scripts/run_nuscenes.py --preset smoke --skip_existing --visualize after_depth
+```
+
+## Depth step
 
 ```bash
 python batch_scripts/depth.py \
@@ -44,19 +52,28 @@ CLI overrides:
 - `input.png`, `depth_map.npy`, `cam_params.json`, PLY files
 - `nuscenes_annotations.json` — COCO-style 2D boxes/masks from 3D labels
 
-## Crops step
+## Downstream steps (correct order)
+
+Use `--data_backend py123d` and `--split nuscenes_val` (or rely on config `run.data_backend`):
+
+1. `enhance.py`
+2. `get_crops_enhanced.py`
+3. `completion.py`
+4. `elevation.py`
+5. `reconstruction.py`
+6. `whole.py`
+7. `tools/combine_results.py --split nuscenes_val`
+
+Example:
 
 ```bash
-python batch_scripts/get_crops_enhanced.py \
+python batch_scripts/enhance.py \
   --data_backend py123d \
   --config configs/py123d_nuscenes.yaml \
   --save_dir ../experimental_results/nuScenes/ \
   --split nuscenes_val \
-  --start_index 0 \
   --end_index -1
 ```
-
-Then continue with `enhance.py`, `completion.py`, `elevation.py`, `reconstruction.py`, `whole.py` using the same `--save_dir` and `--split nuscenes_val`.
 
 ## Coordinates
 

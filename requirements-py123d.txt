@@ -1,0 +1,3 @@
+# Optional: py123d nuScenes adapter (install separately from main requirements.txt)
+# pip install -r requirements-py123d.txt
+py123d[nuscenes]>=0.4.0

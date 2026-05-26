@@ -37,25 +37,45 @@ We release the source code for the refinement interface at https://github.com/UV
 
 📖 **[COCO Pipeline Guide](docs/COCO_PIPELINE.md)** - Run the pipeline on COCO dataset
 
-📡 **[LiDAR Input Guide](docs/LIDAR_INPUT.md)** - Use world-frame LiDAR + calibration instead of MoGe/DepthPro for the depth step
+📡 **[LiDAR Input Guide](docs/LIDAR_INPUT.md)** - World-frame LiDAR + calibration (manifest) instead of MoGe/DepthPro
+
+🚗 **[py123d nuScenes Guide](docs/PY123D_NUSCENES.md)** - Autonomous-driving data via [py123d](https://github.com/kesai-labs/py123d) Arrow logs (nuScenes)
 
 🔧 **[OVMono3D Fine-tuning](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D/tree/ovmono3d_finetune)** - Code for fine-tuning OVMono3D on LabelAny3D pseudo annotations
 
 ## Extensions in This Fork
 
-This repository extends the upstream [LabelAny3D](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D) pipeline for easier deployment and sensor fusion.
+This fork extends [LabelAny3D](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D) with **alternative depth inputs** and deployment notes. Downstream steps (`enhance.py` → `whole.py`) are unchanged once each scene folder contains `depth_map.npy`, `cam_params.json`, and (for crops) instance annotations.
 
-### Implemented
+### Depth backends (`batch_scripts/depth.py`)
+
+| `--depth_source` | Input | Config | Docs |
+|------------------|-------|--------|------|
+| `estimate` (default) | MoGe + DepthPro | `configs/image.yaml` | [COCO Pipeline](docs/COCO_PIPELINE.md) |
+| `lidar` | RGB + `.ply`/`.npz` + calib JSON manifest | `configs/lidar.yaml` | [LIDAR_INPUT](docs/LIDAR_INPUT.md) |
+| `py123d` | py123d Arrow logs (nuScenes, etc.) | `configs/py123d_nuscenes.yaml` | [PY123D_NUSCENES](docs/PY123D_NUSCENES.md) |
+
+Shared options: `--depth_fill nearest` (sparse LiDAR), `--start_index` / `--end_index` (`-1` = all), resume when `depth_map.npy` exists.
+
+Optional dependency for py123d:
+
+```bash
+pip install -r requirements-py123d.txt
+export PY123D_DATA_ROOT=/path/to/py123d_data
+```
+
+### Other features
 
 | Feature | Description |
 |---------|-------------|
-| **LiDAR depth step** | `--depth_source lidar` in `depth.py` skips MoGe/DepthPro; builds `depth_map.npy`, PLY, and `cam_params.json` from world-frame point clouds + `world_to_cam` / `c2w` calibration ([guide](docs/LIDAR_INPUT.md)) |
-| **Manifest loader** | `LidarManifestLoader` + `configs/lidar.yaml` for RGB + `.ply`/`.npz` + per-scene calib JSON |
-| **Sparse LiDAR holes** | `--depth_fill nearest` propagates depth into empty pixels before downstream alignment |
-| **Resume** | Depth step skips scenes that already have `depth_map.npy` and `cam_params.json` |
-| **Smoke tests** | `python tests/test_lidar_depth_smoke.py` (CPU, no GPU) |
+| **Manifest loader** | `LidarManifestLoader` for custom RGB + LiDAR + calib datasets |
+| **py123d adapter** | `src/integrations/py123d/` — nuScenes loader, 3D box → COCO `nuscenes_annotations.json` |
+| **Crops backend** | `get_crops_enhanced.py --data_backend py123d` reads depth-step output folders |
+| **Tests** | `tests/test_lidar_depth_smoke.py`, `tests/test_py123d_coord.py`, `tests/test_py123d_annotations.py` |
 
-Quick start (from `src/`):
+### Quick start (from `src/`)
+
+**Custom LiDAR manifest:**
 
 ```bash
 python batch_scripts/depth.py \
@@ -66,7 +86,23 @@ python batch_scripts/depth.py \
   --start_index 0 --end_index -1
 ```
 
-Then continue the standard pipeline (`enhance.py` → `whole.py`) with the same `--save_dir` and split name. See [COCO Pipeline Guide](docs/COCO_PIPELINE.md) for step order.
+**py123d nuScenes** (after `py123d-conversion`; see [PY123D_NUSCENES.md](docs/PY123D_NUSCENES.md)):
+
+```bash
+python batch_scripts/depth.py \
+  --depth_source py123d \
+  --config configs/py123d_nuscenes.yaml \
+  --save_dir ../experimental_results/nuScenes/ \
+  --end_index -1
+
+python batch_scripts/get_crops_enhanced.py \
+  --data_backend py123d \
+  --config configs/py123d_nuscenes.yaml \
+  --split nuscenes_val \
+  --end_index -1
+```
+
+Then run `enhance.py` → `completion.py` → `elevation.py` → `reconstruction.py` → `whole.py` with the same `--save_dir` and split. See [COCO Pipeline Guide](docs/COCO_PIPELINE.md).
 
 ### Deployment & Optimization Recommendations
 
@@ -112,6 +148,7 @@ This work builds on many open-source projects:
 - [InvSR](https://github.com/zsyOAOA/InvSR) - Image super-resolution
 - [COCONUT](https://github.com/bytedance/coconut_cvpr2024) - COCO segmentation annotations
 - [OVMono3D](https://github.com/UVA-Computer-Vision-Lab/ovmono3d) - Open vocabulary monocular 3D detection
+- [py123d](https://github.com/kesai-labs/py123d) - Unified autonomous driving dataset API (optional nuScenes adapter in this fork)
 
 
 ## License

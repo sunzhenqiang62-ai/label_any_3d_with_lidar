@@ -4,10 +4,12 @@ Depth estimation pipeline.
 Modes:
   estimate (default): MoGe + DepthPro + RANSAC alignment
   lidar: world-frame LiDAR + calibration -> depth_map / PLY / cam_params
+  py123d: nuScenes (etc.) via py123d Arrow logs -> depth_map + nuscenes_annotations.json
 
 Usage:
     python batch_scripts/depth.py --start_index 0 --end_index 100 --split val
     python batch_scripts/depth.py --depth_source lidar --manifest ../dataset/lidar/manifest.json --config configs/lidar.yaml
+    python batch_scripts/depth.py --depth_source py123d --config configs/py123d_nuscenes.yaml --end_index -1
 """
 import argparse
 from omegaconf import OmegaConf
@@ -21,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import json
 import trimesh
+from PIL import Image
 
 from util import depth_to_points
 from batch_scripts.coconut_loader import CoconutLoader, get_dataset_paths
@@ -140,6 +143,29 @@ def run_estimate_depth(scene, out_dir, depthpro_model, depthpro_transform):
         json.dump(cam_params, fp)
 
 
+class _NumpyImageScene:
+    """Minimal scene wrapper for prepare_output_dirs from numpy RGB."""
+
+    def __init__(self, image_np):
+        self.image_np = image_np
+        self.image_pil = Image.fromarray(image_np.astype(np.uint8))
+
+
+def run_py123d_depth(sample, out_dir, depth_fill="nearest"):
+    """Build depth + annotations from py123d nuScenes sample dict."""
+    scene = _NumpyImageScene(sample["image_np"])
+    build_scene_outputs(
+        out_dir,
+        sample["image_np"],
+        sample["points_world"],
+        sample["calib"],
+        depth_fill=depth_fill,
+    )
+    ann_path = Path(out_dir) / "nuscenes_annotations.json"
+    with open(ann_path, "w") as f:
+        json.dump(sample["annotations"], f)
+
+
 def copy_optional_annotations(scene_entry, out_dir):
     """Copy manifest annotations file into scene folder as bboxes.json if provided."""
     ann_path = scene_entry.get("annotations_path")
@@ -159,9 +185,9 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", help="save directory", default="../experimental_results/COCO/", type=str)
     parser.add_argument(
         "--depth_source",
-        choices=["estimate", "lidar"],
+        choices=["estimate", "lidar", "py123d"],
         default=None,
-        help="depth backend: estimate (MoGe+DepthPro) or lidar (external point cloud)",
+        help="depth backend: estimate, lidar (manifest), or py123d (Arrow logs)",
     )
     parser.add_argument(
         "--manifest",
@@ -175,6 +201,12 @@ if __name__ == "__main__":
         default=None,
         help="hole filling for sparse LiDAR depth maps",
     )
+    parser.add_argument("--py123d_data_root", default=None, help="PY123D_DATA_ROOT override")
+    parser.add_argument("--py123d_dataset", default=None, help="py123d dataset name (default nuscenes)")
+    parser.add_argument("--py123d_split", default=None, help="py123d split type: train/val/test")
+    parser.add_argument("--camera_key", default=None, help="py123d camera id/name (e.g. CAM_FRONT)")
+    parser.add_argument("--lidar_key", default=None, help="py123d lidar id (default merged)")
+    parser.add_argument("--py123d_max_scenes", type=int, default=None, help="cap scenes from py123d filter")
 
     args, extras = parser.parse_known_args()
     opt = OmegaConf.merge(OmegaConf.load(args.config), OmegaConf.from_cli(extras))
@@ -183,7 +215,36 @@ if __name__ == "__main__":
     depth_fill = args.depth_fill or opt.run.depth.get("fill", "none")
     end_index = None if args.end_index < 0 else args.end_index
 
-    if depth_source == "lidar":
+    if depth_source == "py123d":
+        from integrations.py123d.nuscenes_adapter import Py123dNuScenesLoader
+
+        py_cfg = opt.run.get("py123d", {})
+        loader = Py123dNuScenesLoader(
+            data_root=args.py123d_data_root,
+            split_type=args.py123d_split or py_cfg.get("split_type", "val"),
+            dataset_name=args.py123d_dataset or py_cfg.get("dataset", "nuscenes"),
+            max_scenes=args.py123d_max_scenes or py_cfg.get("max_scenes"),
+            camera_key=args.camera_key or py_cfg.get("camera_key", "CAM_FRONT"),
+            lidar_key=args.lidar_key or py_cfg.get("lidar_key", "merged"),
+            frame_index=py_cfg.get("frame_index"),
+        )
+        split = args.split if args.split not in ("val",) else loader.split
+        indices = range(args.start_index, end_index if end_index is not None else len(loader))
+
+        for i in tqdm(indices, desc="py123d depth"):
+            sample = loader.extract_sample(i)
+            output_dir = os.path.join(args.save_dir, split, loader.output_dir_name(sample))
+            scene = _NumpyImageScene(sample["image_np"])
+            out_dir = prepare_output_dirs(output_dir, scene)
+            print(f"Saving to {out_dir}")
+            if depth_already_done(out_dir):
+                if not (out_dir / "nuscenes_annotations.json").exists():
+                    with open(out_dir / "nuscenes_annotations.json", "w") as f:
+                        json.dump(sample["annotations"], f)
+                continue
+            run_py123d_depth(sample, out_dir, depth_fill=depth_fill)
+
+    elif depth_source == "lidar":
         if not args.manifest:
             raise ValueError("--manifest is required when --depth_source=lidar")
         loader = LidarManifestLoader(args.manifest)

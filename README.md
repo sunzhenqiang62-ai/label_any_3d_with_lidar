@@ -2,13 +2,13 @@
 
 # LabelAny3D: Label Any Object 3D in the Wild
 
+**Fork extension:** LiDAR / py123d depth inputs · easier deployment on driving & custom sensor data
+
 [Jin Yao][jy], [Radowan Mahmud Redoy][rr], [Sebastian Elbaum][se], [Matthew B. Dwyer][md], [Zezhou Cheng][zc]
 
-
-[![Website](https://img.shields.io/badge/Project-Page-b361ff
-)](https://uva-computer-vision-lab.github.io/LabelAny3D/)
+[![Website](https://img.shields.io/badge/Project-Page-b361ff)](https://uva-computer-vision-lab.github.io/LabelAny3D/)
 [![Paper](https://img.shields.io/badge/arXiv-PDF-b31b1b)](https://openreview.net/pdf?id=Q2fU0JDHuW)
-
+[![Upstream](https://img.shields.io/badge/Upstream-UVA_LabelAny3D-blue)](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D)
 
 </div>
 
@@ -23,59 +23,56 @@
 </tr>
 </table>
 
-## COCO3D Dataset
+---
 
-The evaluation set of COCO3D and pseudo-labeled training set are available at [Hugging Face](https://huggingface.co/datasets/uva-cv-lab/COCO3D).
+## What changed in this fork
 
-## 3D BBox Human Refinement Interface
+Based on [UVA LabelAny3D](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D). **The original COCO + MoGe/DepthPro pipeline is unchanged**; we add optional ways to supply **metric depth from real LiDAR** and to run on **nuScenes via py123d**, without retraining the core 3D models.
 
-We release the source code for the refinement interface at https://github.com/UVA-Computer-Vision-Lab/3d_annotator.
+### Highlights
 
-## Getting Started
+| Change | What it does |
+|--------|----------------|
+| **Three depth backends** | `depth.py --depth_source estimate \| lidar \| py123d` — same outputs for downstream steps |
+| **Custom LiDAR** | Manifest + calib JSON → `depth_map.npy`, PLY, `cam_params.json` ([guide](docs/LIDAR_INPUT.md)) |
+| **py123d + nuScenes** | Arrow logs → depth + projected 3D-box masks (`nuscenes_annotations.json`) for crops ([guide](docs/PY123D_NUSCENES.md)) |
+| **Skip finished scenes** | Resume when `depth_map.npy` + `cam_params.json` already exist |
+| **Sparse LiDAR** | `--depth_fill nearest` fills empty depth pixels before alignment |
+| **CPU smoke tests** | `test_lidar_depth_smoke.py`, `test_py123d_coord.py`, `test_py123d_annotations.py` |
 
-📦 **[Installation Guide](docs/INSTALL.md)** - Setup instructions and external dependencies
+### New / modified files (fork)
 
-📖 **[COCO Pipeline Guide](docs/COCO_PIPELINE.md)** - Run the pipeline on COCO dataset
-
-📡 **[LiDAR Input Guide](docs/LIDAR_INPUT.md)** - World-frame LiDAR + calibration (manifest) instead of MoGe/DepthPro
-
-🚗 **[py123d nuScenes Guide](docs/PY123D_NUSCENES.md)** - Autonomous-driving data via [py123d](https://github.com/kesai-labs/py123d) Arrow logs (nuScenes)
-
-🔧 **[OVMono3D Fine-tuning](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D/tree/ovmono3d_finetune)** - Code for fine-tuning OVMono3D on LabelAny3D pseudo annotations
-
-## Extensions in This Fork
-
-This fork extends [LabelAny3D](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D) with **alternative depth inputs** and deployment notes. Downstream steps (`enhance.py` → `whole.py`) are unchanged once each scene folder contains `depth_map.npy`, `cam_params.json`, and (for crops) instance annotations.
-
-### Depth backends (`batch_scripts/depth.py`)
-
-| `--depth_source` | Input | Config | Docs |
-|------------------|-------|--------|------|
-| `estimate` (default) | MoGe + DepthPro | `configs/image.yaml` | [COCO Pipeline](docs/COCO_PIPELINE.md) |
-| `lidar` | RGB + `.ply`/`.npz` + calib JSON manifest | `configs/lidar.yaml` | [LIDAR_INPUT](docs/LIDAR_INPUT.md) |
-| `py123d` | py123d Arrow logs (nuScenes, etc.) | `configs/py123d_nuscenes.yaml` | [PY123D_NUSCENES](docs/PY123D_NUSCENES.md) |
-
-Shared options: `--depth_fill nearest` (sparse LiDAR), `--start_index` / `--end_index` (`-1` = all), resume when `depth_map.npy` exists.
-
-Optional dependency for py123d:
-
-```bash
-pip install -r requirements-py123d.txt
-export PY123D_DATA_ROOT=/path/to/py123d_data
+```
+src/geometry/lidar_depth.py          # LiDAR → depth_map / PLY / cam_params
+src/batch_scripts/lidar_loader.py
+src/batch_scripts/py123d_loader.py
+src/integrations/py123d/              # nuScenes adapter (coord, annotations, loader)
+src/configs/lidar.yaml
+src/configs/py123d_nuscenes.yaml
+docs/LIDAR_INPUT.md
+docs/PY123D_NUSCENES.md
+requirements-py123d.txt                # optional: pip install -r requirements-py123d.txt
 ```
 
-### Other features
+Modified: `src/batch_scripts/depth.py`, `src/batch_scripts/get_crops_enhanced.py`, `src/dataset_model/BaseScene.py`, `PointCloudScene.py`
 
-| Feature | Description |
-|---------|-------------|
-| **Manifest loader** | `LidarManifestLoader` for custom RGB + LiDAR + calib datasets |
-| **py123d adapter** | `src/integrations/py123d/` — nuScenes loader, 3D box → COCO `nuscenes_annotations.json` |
-| **Crops backend** | `get_crops_enhanced.py --data_backend py123d` reads depth-step output folders |
-| **Tests** | `tests/test_lidar_depth_smoke.py`, `tests/test_py123d_coord.py`, `tests/test_py123d_annotations.py` |
+### Depth step at a glance
 
-### Quick start (from `src/`)
+| Mode | When to use | Key command |
+|------|-------------|-------------|
+| `estimate` | Original COCO / in-the-wild (MoGe + DepthPro) | `python batch_scripts/depth.py --split val` |
+| `lidar` | You have RGB + world-frame point cloud + calibration | `--depth_source lidar --manifest .../manifest.json` |
+| `py123d` | nuScenes (or other sets) already converted with [py123d](https://github.com/kesai-labs/py123d) | `--depth_source py123d --config configs/py123d_nuscenes.yaml` |
 
-**Custom LiDAR manifest:**
+All modes write the **same scene layout** (`input.png`, `depth_map.npy`, `cam_params.json`, …) so `enhance.py` → `whole.py` stay compatible.
+
+---
+
+## Quick start (fork features)
+
+Run from the `src/` directory after [installation](docs/INSTALL.md).
+
+**1. Custom LiDAR (manifest)**
 
 ```bash
 python batch_scripts/depth.py \
@@ -86,9 +83,12 @@ python batch_scripts/depth.py \
   --start_index 0 --end_index -1
 ```
 
-**py123d nuScenes** (after `py123d-conversion`; see [PY123D_NUSCENES.md](docs/PY123D_NUSCENES.md)):
+**2. py123d nuScenes**
 
 ```bash
+pip install -r requirements-py123d.txt
+export PY123D_DATA_ROOT=/path/to/py123d_data
+
 python batch_scripts/depth.py \
   --depth_source py123d \
   --config configs/py123d_nuscenes.yaml \
@@ -102,20 +102,51 @@ python batch_scripts/get_crops_enhanced.py \
   --end_index -1
 ```
 
-Then run `enhance.py` → `completion.py` → `elevation.py` → `reconstruction.py` → `whole.py` with the same `--save_dir` and split. See [COCO Pipeline Guide](docs/COCO_PIPELINE.md).
+**3. Continue the standard pipeline** (same `--save_dir` and split):
 
-### Deployment & Optimization Recommendations
+`enhance.py` → `get_crops_enhanced.py` (if not using py123d crops) → `completion.py` → `elevation.py` → `reconstruction.py` → `whole.py`
 
-The core pipeline still runs as eight batch scripts from `src/`. For production or cluster use, consider:
+Details: [COCO Pipeline](docs/COCO_PIPELINE.md) · [LiDAR](docs/LIDAR_INPUT.md) · [py123d nuScenes](docs/PY123D_NUSCENES.md)
 
-- **Environment variables** — Centralize paths (`LA3D_ROOT`, `LA3D_CHECKPOINTS`, `HF_HOME`) instead of hard-coded `../external` and `../dataset`.
-- **Unified entrypoint** — Wrap all steps in one CLI (e.g. `pipeline.py run --steps depth,enhance,...`) with preflight checks for CUDA, weights, and data.
-- **Docker** — Multi-stage image with CUDA 12.1, pinned PyTorch, and volume mounts for checkpoints, datasets, and `experimental_results/` ([install steps](docs/INSTALL.md)).
-- **Offline weights** — Bundle `external/checkpoints` and Hugging Face caches for air-gapped clusters.
-- **Stage services** — Split heavy steps (depth, enhance, TRELLIS recon) into separate GPU jobs with shared object storage between stages.
-- **SLURM** — Shard by `--start_index` / `--end_index`; see array-job example in [COCO_PIPELINE.md](docs/COCO_PIPELINE.md).
+---
 
-Platform note: full install (TRELLIS, kaolin, flash-attn) is tested on **Linux + NVIDIA GPU**. Windows users should use WSL2 or a Linux server.
+## Documentation
+
+| Guide | Content |
+|-------|---------|
+| [INSTALL.md](docs/INSTALL.md) | Environment, checkpoints, TRELLIS / external deps |
+| [COCO_PIPELINE.md](docs/COCO_PIPELINE.md) | Original 8-step COCO pipeline |
+| [LIDAR_INPUT.md](docs/LIDAR_INPUT.md) | Manifest format, calib JSON, coordinate frames |
+| [PY123D_NUSCENES.md](docs/PY123D_NUSCENES.md) | `PY123D_DATA_ROOT`, conversion, py123d CLI |
+
+---
+
+## Deployment notes (optional)
+
+For clusters or production:
+
+- Centralize paths with env vars (`LA3D_ROOT`, `LA3D_CHECKPOINTS`, `HF_HOME`, `PY123D_DATA_ROOT`)
+- Shard jobs with `--start_index` / `--end_index` (see SLURM example in [COCO_PIPELINE.md](docs/COCO_PIPELINE.md))
+- Prefer **Linux + NVIDIA GPU**; use WSL2 on Windows
+- Consider Docker + offline checkpoint bundles for air-gapped installs ([INSTALL.md](docs/INSTALL.md))
+
+---
+
+## Original project
+
+### COCO3D dataset
+
+The evaluation set of COCO3D and pseudo-labeled training set are available at [Hugging Face](https://huggingface.co/datasets/uva-cv-lab/COCO3D).
+
+### 3D bbox human refinement interface
+
+Source code: https://github.com/UVA-Computer-Vision-Lab/3d_annotator
+
+### OVMono3D fine-tuning
+
+https://github.com/UVA-Computer-Vision-Lab/LabelAny3D/tree/ovmono3d_finetune
+
+---
 
 ## Citing
 
@@ -140,16 +171,16 @@ If you find this work useful for your research, please kindly cite:
 ## Acknowledgements
 
 This work builds on many open-source projects:
-- [Gen3DSR](https://github.com/AndreeaDogaru/Gen3DSR) - 3D reconstruction framework
-- [TRELLIS](https://github.com/microsoft/TRELLIS) - 3D asset generation
-- [MoGe](https://github.com/microsoft/MoGe) - Monocular geometry estimation
-- [DepthPro](https://github.com/apple/ml-depth-pro) - Metric depth estimation
-- [MASt3R](https://github.com/naver/mast3r) - Dense matching
-- [InvSR](https://github.com/zsyOAOA/InvSR) - Image super-resolution
-- [COCONUT](https://github.com/bytedance/coconut_cvpr2024) - COCO segmentation annotations
-- [OVMono3D](https://github.com/UVA-Computer-Vision-Lab/ovmono3d) - Open vocabulary monocular 3D detection
-- [py123d](https://github.com/kesai-labs/py123d) - Unified autonomous driving dataset API (optional nuScenes adapter in this fork)
 
+- [Gen3DSR](https://github.com/AndreeaDogaru/Gen3DSR) — 3D reconstruction framework
+- [TRELLIS](https://github.com/microsoft/TRELLIS) — 3D asset generation
+- [MoGe](https://github.com/microsoft/MoGe) — Monocular geometry estimation
+- [DepthPro](https://github.com/apple/ml-depth-pro) — Metric depth estimation
+- [MASt3R](https://github.com/naver/mast3r) — Dense matching
+- [InvSR](https://github.com/zsyOAOA/InvSR) — Image super-resolution
+- [COCONUT](https://github.com/bytedance/coconut_cvpr2024) — COCO segmentation annotations
+- [OVMono3D](https://github.com/UVA-Computer-Vision-Lab/ovmono3d) — Open vocabulary monocular 3D detection
+- [py123d](https://github.com/kesai-labs/py123d) — Unified autonomous driving data API (optional adapter in this fork)
 
 ## License
 

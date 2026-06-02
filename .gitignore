@@ -1,0 +1,45 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Local/editor state
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.pytest_cache/
+
+# Local temporary repos/workdirs
+.push_tmp/
+.push_tmp2/
+
+# Data and generated outputs
+dataset/
+experimental_results/
+out/
+transfer_out/
+
+# Model checkpoints and large binaries
+external/checkpoints/
+external/InvSR/weights/
+src/weights/
+*.bin
+*.pth
+*.pt
+*.safetensors
+*.so
+*.glb
+
+# Logs and job artifacts
+*.err
+*.out
+src/log*
+src/slurm/
+src/sbatch_logs*
+src/sh_scripts*
+
+# Generated/random config artifacts
+src/random_categories*.json
+src/random_coco_label*.json
+src/tools/*.json

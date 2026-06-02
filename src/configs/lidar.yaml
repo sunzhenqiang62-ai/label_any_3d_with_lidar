@@ -1,0 +1,31 @@
+scene:
+  type: 'PointCloudScene'
+  attributes:
+    img_path: ''
+    pointcloud_path: ''
+    calib_path: ''
+  annotations_path: ''
+  save_dir: '../experimental_results/LiDAR/'
+  K: []
+run:
+  use_enhancement: True
+  only_foreground: True
+  single_object: False
+  reproject: False
+  depth_edge_threshold: 0.0001
+  amodal_completion: 'our'
+  obj_rec: 'trellis'
+  depth:
+    source: 'lidar'
+    fill: 'none'
+  segmentation:
+    holistic: 'entityv2'
+    fg_bg: 'clipseg'
+    merge_masks:
+      dilation: 7
+      threshold: 0.5
+    tagger: 'ovsam'
+  calibration:
+    intrinsics: 'gt'
+    pose: 'gt'
+  clip_bg: False

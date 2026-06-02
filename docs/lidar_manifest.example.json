@@ -1,0 +1,11 @@
+{
+  "split": "lidar",
+  "scenes": [
+    {
+      "id": "scene_001",
+      "image": "images/001.jpg",
+      "pointcloud": "lidar/001.ply",
+      "calib": "calib/001.json"
+    }
+  ]
+}

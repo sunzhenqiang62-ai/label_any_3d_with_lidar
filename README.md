@@ -84,6 +84,16 @@ Pipeline order: `depth` → `enhance` → `crops` → `completion` → `elevatio
 
 Details: [nuScenes experiment](docs/NUSCENES_EXPERIMENT.md) · [COCO Pipeline](docs/COCO_PIPELINE.md) · [LiDAR](docs/LIDAR_INPUT.md) · [py123d nuScenes](docs/PY123D_NUSCENES.md)
 
+### nuScenes smoke visualization
+
+Example output from a one-scene `nuscenes-mini` smoke run with LiDAR depth, reconstructed meshes, 3D boxes, and vehicle categories enabled.
+
+![nuScenes smoke summary](docs/assets/nuscenes_smoke_summary.png)
+
+| Reconstructed mesh projection | BEV with LiDAR points + 3D boxes |
+|---|---|
+| ![Projected reconstructed meshes](docs/assets/nuscenes_mesh_overlay.png) | ![Bird's-eye view](docs/assets/nuscenes_bev_3d.png) |
+
 ---
 
 ## Environment verification (2026-05-27)

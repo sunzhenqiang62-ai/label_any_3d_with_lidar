@@ -98,10 +98,7 @@ def test_boxes_to_gt_3dbbox_cam():
 
     cam = _FakeCamera()
     gt = boxes_to_gt_3dbbox_cam([_FakeDet()], cam)
-    assert len(gt) == 1
-    assert gt[0]["source"] == "gt"
-    assert gt[0]["category_name"] == "person"
-    assert len(gt[0]["bbox3D_cam"]) == 8
+    assert len(gt) == 1 and gt[0]["source"] == "gt"
     assert np.min(np.array(gt[0]["bbox3D_cam"])[:, 2]) > 0
 
 

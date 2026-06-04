@@ -13,8 +13,6 @@ dist/
 # Local temporary repos/workdirs
 .push_tmp/
 .push_tmp2/
-.upload_git/
-.git.corrupt.backup.*/
 
 # Data and generated outputs
 dataset/

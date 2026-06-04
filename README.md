@@ -13,9 +13,9 @@ Based on [UVA LabelAny3D](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D)
 | **Skip finished scenes** | Resume when `depth_map.npy` + `cam_params.json` already exist |
 | **Sparse LiDAR** | `--depth_fill nearest` fills empty depth pixels before alignment |
 | **CPU smoke tests** | `test_lidar_depth_smoke.py`, `test_py123d_coord.py`, `test_py123d_annotations.py` |
-| **Scene visualization** | `visualize_scene.py`: 3×N summary grid, high-res BEV with GT (color) + Pred (blue), mesh / point-cloud overlays |
-| **GT 3D boxes (py123d)** | `nuscenes_gt_3dbbox.json` per scene; used in BEV without per-box GT text labels |
-| **Model-based crops (nuScenes)** | OneFormer segmentation + tagging; `allowed_categories: ['car', 'person']` in smoke/full configs |
+| **Scene visualization** | `visualize_scene.py`: 3×N summary grid, high-res BEV with GT (color) + Pred (blue) |
+| **GT 3D boxes (py123d)** | `nuscenes_gt_3dbbox.json` per scene; BEV GT footprints without text labels |
+| **Model-based crops** | OneFormer segmentation/tagging; `allowed_categories: ['car', 'person']` in configs |
 
 ### New / modified files (fork)
 
@@ -83,7 +83,7 @@ python batch_scripts/run_nuscenes.py --preset smoke --skip_existing --visualize 
 python tools/visualize_scene.py --root ../experimental_results/nuScenes/nuscenes_val --mode compose
 ```
 
-`compose` builds `viz/summary.png`: **3 panels per row**, full-width **BEV** on the last row. BEV draws dataset GT boxes (green / orange by class, no text on GT) and pipeline predictions (blue, `Pred:` labels). Requires `nuscenes_gt_3dbbox.json` (written at `depth` for py123d) or `PY123D_DATA_ROOT` for on-the-fly GT export.
+`compose` builds `viz/summary.png`: **3 panels per row**, full-width **BEV** on the last row (GT by color, Pred in blue).
 
 Pipeline order: `depth` → `enhance` → `crops` → `completion` → `elevation` → `reconstruction` → `whole`. All nuScenes steps use `--data_backend py123d`.
 
@@ -91,19 +91,13 @@ Details: [nuScenes experiment](docs/NUSCENES_EXPERIMENT.md) · [COCO Pipeline](d
 
 ### nuScenes smoke visualization
 
-One-scene `nuscenes-mini` smoke run with **py123d LiDAR depth**, **OneFormer** instance masks (`car` / `person`), TRELLIS meshes, and **GT + predicted 3D boxes** in BEV.
+One-scene `nuscenes-mini` smoke run with **py123d LiDAR depth**, **OneFormer** (`car` / `person`), TRELLIS meshes, and **GT + predicted 3D boxes** in BEV.
 
 ![nuScenes OneFormer smoke summary](docs/assets/nuscenes_oneformer_smoke_summary.png)
 
-The summary layout: row 1 — GT 2D, depth, crops; row 2 — 3D box overlay, mesh projection, LiDAR point projection; row 3 — full-width BEV (colored GT footprints + blue predictions).
+Layout: row 1 — GT 2D, depth, crops; row 2 — 3D boxes, mesh projection, LiDAR projection; row 3 — full-width BEV (colored GT, blue Pred).
 
-| Panel | Description |
-|-------|-------------|
-| GT 2D / depth / crops | Input, metric depth colormap, detected instance crops |
-| bbox / mesh / pc_proj | 3D boxes on image, reconstructed mesh overlay, LiDAR projected to camera |
-| BEV | 1920×1920 bird's-eye (X–Z): gray point cloud, **GT** by category color, **Pred** in blue |
-
-Older examples (LiDAR-only smoke): [summary](docs/assets/nuscenes_smoke_summary.png) · [mesh](docs/assets/nuscenes_mesh_overlay.png) · [BEV](docs/assets/nuscenes_bev_3d.png)
+Older examples: [summary](docs/assets/nuscenes_smoke_summary.png) · [mesh](docs/assets/nuscenes_mesh_overlay.png) · [BEV](docs/assets/nuscenes_bev_3d.png)
 
 ---
 

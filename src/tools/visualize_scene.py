@@ -240,7 +240,6 @@ def render_pointcloud_projection(
 
 
 BEV_CANVAS_SIZE = 1920
-
 BEV_PRED_COLOR = (220, 80, 30)
 BEV_GT_COLORS = {
     "car": (0, 180, 0),
@@ -334,15 +333,13 @@ def _collect_valid_xz(boxes: List[dict]) -> List[np.ndarray]:
 
 
 def _bev_gt_color(category_name: str) -> tuple[int, int, int]:
-    key = (category_name or "object").lower()
-    return BEV_GT_COLORS.get(key, BEV_GT_COLORS["default"])
+    return BEV_GT_COLORS.get((category_name or "object").lower(), BEV_GT_COLORS["default"])
 
 
 def _bev_footprint_polygon(verts: np.ndarray, to_px) -> Optional[np.ndarray]:
     if verts.shape[0] < 4:
         return None
-    xz = verts[:, [0, 2]].astype(np.float32)
-    hull = cv2.convexHull(xz.reshape(-1, 1, 2))
+    hull = cv2.convexHull(verts[:, [0, 2]].astype(np.float32).reshape(-1, 1, 2))
     if hull is None or len(hull) < 3:
         return None
     return np.array(
@@ -373,7 +370,6 @@ def _draw_bev_boxes(
             continue
         if not np.isfinite(verts).all() or np.min(verts[:, 2]) <= 1e-6:
             continue
-
         if use_convex_hull and len(verts) >= 4:
             pts = _bev_footprint_polygon(verts, to_px)
         else:
@@ -386,17 +382,15 @@ def _draw_bev_boxes(
             )
         if pts is None or len(pts) < 3:
             continue
-
         cv2.polylines(bev, [pts], isClosed=True, color=color, thickness=line_th, lineType=cv2.LINE_AA)
         center = b.get("center_cam", verts.mean(axis=0).tolist())
         cpx, cpy = to_px(float(center[0]), float(center[2]))
         cv2.circle(bev, (cpx, cpy), center_r, color, -1, lineType=cv2.LINE_AA)
         if draw_labels:
-            label = f"{label_prefix}{b.get('obj_id', '?')}_{b.get('category_name', 'obj')}"
             label_off = max(4, int(4 * label_scale_offset))
             cv2.putText(
                 bev,
-                label,
+                f"{label_prefix}{b.get('obj_id', '?')}_{b.get('category_name', 'obj')}",
                 (cpx + label_off, cpy - label_off),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 label_scale,
@@ -495,33 +489,18 @@ def render_bev_3d(scene_dir: Path, out_dir: Path, canvas: int = BEV_CANVAS_SIZE)
 
     gt_th = max(line_th, int(line_th * 1.15))
     for b in gt_boxes:
-        cat = (b.get("category_name") or "object").lower()
         _draw_bev_boxes(
-            bev,
-            [b],
-            to_px,
-            color=_bev_gt_color(cat),
-            line_th=gt_th,
-            center_r=center_r,
-            label_scale=label_scale,
-            label_th=label_th,
-            label_scale_offset=scale,
-            draw_labels=False,
-            use_convex_hull=True,
+            bev, [b], to_px,
+            color=_bev_gt_color(b.get("category_name", "object")),
+            line_th=gt_th, center_r=center_r, label_scale=label_scale,
+            label_th=label_th, label_scale_offset=scale,
+            draw_labels=False, use_convex_hull=True,
         )
-
     if pred_boxes:
         _draw_bev_boxes(
-            bev,
-            pred_boxes,
-            to_px,
-            color=BEV_PRED_COLOR,
-            line_th=line_th,
-            center_r=center_r,
-            label_scale=label_scale,
-            label_th=label_th,
-            label_scale_offset=scale,
-            label_prefix="Pred:",
+            bev, pred_boxes, to_px, color=BEV_PRED_COLOR,
+            line_th=line_th, center_r=center_r, label_scale=label_scale,
+            label_th=label_th, label_scale_offset=scale, label_prefix="Pred:",
             bottom_face_indices=[0, 1, 2, 3],
         )
 
@@ -532,38 +511,15 @@ def render_bev_3d(scene_dir: Path, out_dir: Path, canvas: int = BEV_CANVAS_SIZE)
         parts.append(f"GT={len(gt_boxes)}")
     if pred_boxes:
         parts.append(f"Pred={len(pred_boxes)}")
-    title = ", ".join(parts)
-    cv2.putText(
-        bev,
-        title,
-        (title_x, title_y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        title_scale,
-        (20, 20, 20),
-        title_th,
-        cv2.LINE_AA,
-    )
-
+    cv2.putText(bev, ", ".join(parts), (title_x, title_y),
+                cv2.FONT_HERSHEY_SIMPLEX, title_scale, (20, 20, 20), title_th, cv2.LINE_AA)
     legend_y = title_y + int(28 * scale)
-    legend_items = [
-        ("Pred", BEV_PRED_COLOR),
-        ("GT car", BEV_GT_COLORS["car"]),
-        ("GT person", BEV_GT_COLORS["person"]),
-        ("GT other", BEV_GT_COLORS["default"]),
-    ]
     lx = title_x
-    for text, col in legend_items:
+    for text, col in [("Pred", BEV_PRED_COLOR), ("GT car", BEV_GT_COLORS["car"]),
+                      ("GT person", BEV_GT_COLORS["person"]), ("GT other", BEV_GT_COLORS["default"])]:
         cv2.rectangle(bev, (lx, legend_y - 10), (lx + 18, legend_y + 4), col, -1)
-        cv2.putText(
-            bev,
-            text,
-            (lx + 24, legend_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            label_scale * 0.9,
-            (30, 30, 30),
-            label_th,
-            cv2.LINE_AA,
-        )
+        cv2.putText(bev, text, (lx + 24, legend_y), cv2.FONT_HERSHEY_SIMPLEX,
+                    label_scale * 0.9, (30, 30, 30), label_th, cv2.LINE_AA)
         lx += int(140 * scale)
     out_path = out_dir / "bev_3d.png"
     cv2.imwrite(str(out_path), bev)
@@ -690,12 +646,9 @@ def _pad_panel_to_width(im: np.ndarray, width: int) -> np.ndarray:
     if w == width:
         return im
     if w > width:
-        x0 = (w - width) // 2
-        return im[:, x0 : x0 + width]
+        return im[:, (w - width) // 2 : (w - width) // 2 + width]
     pad = width - w
-    left = pad // 2
-    right = pad - left
-    return cv2.copyMakeBorder(im, 0, 0, left, right, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+    return cv2.copyMakeBorder(im, 0, 0, pad // 2, pad - pad // 2, cv2.BORDER_CONSTANT, value=(0, 0, 0))
 
 
 def _compose_summary_grid(
@@ -705,39 +658,22 @@ def _compose_summary_grid(
     target_h: int = 360,
     cols: int = 3,
 ) -> np.ndarray:
-    """Layout: ``cols`` panels per row; optional BEV row spans full row width below."""
-    if not panels and bev_panel is None:
-        raise ValueError("No panels to compose")
-
     resized = [_resize_to_height(im, target_h) for im in panels]
     cell_w = max(im.shape[1] for im in resized) if resized else target_h
     row_width = cell_w * cols
-
     rows: List[np.ndarray] = []
     for i in range(0, len(resized), cols):
-        row_cells = [
-            _pad_panel_to_width(im, cell_w) for im in resized[i : i + cols]
-        ]
+        row_cells = [_pad_panel_to_width(im, cell_w) for im in resized[i : i + cols]]
         while len(row_cells) < cols:
             row_cells.append(np.zeros((target_h, cell_w, 3), dtype=np.uint8))
         row = np.hstack(row_cells)
         if row.shape[1] < row_width:
             row = _pad_panel_to_width(row, row_width)
         rows.append(row)
-
     if bev_panel is not None:
-        bev_scale = row_width / bev_panel.shape[1]
-        bev_h = max(1, int(bev_panel.shape[0] * bev_scale))
-        interp = cv2.INTER_AREA if bev_scale < 1.0 else cv2.INTER_CUBIC
-        bev_row = cv2.resize(bev_panel, (row_width, bev_h), interpolation=interp)
-        rows.append(bev_row)
-
-    if not rows:
-        bev_scale = row_width / bev_panel.shape[1]
-        bev_h = max(1, int(bev_panel.shape[0] * bev_scale))
-        interp = cv2.INTER_AREA if bev_scale < 1.0 else cv2.INTER_CUBIC
-        return cv2.resize(bev_panel, (row_width, bev_h), interpolation=interp)
-
+        bev_h = max(1, int(bev_panel.shape[0] * row_width / bev_panel.shape[1]))
+        interp = cv2.INTER_AREA if row_width < bev_panel.shape[1] else cv2.INTER_CUBIC
+        rows.append(cv2.resize(bev_panel, (row_width, bev_h), interpolation=interp))
     return np.vstack(rows)
 
 
@@ -770,10 +706,8 @@ def render_compose(scene_dir: Path, out_dir: Path, modes: List[str]) -> Optional
                 bev_panel = im
             else:
                 panels.append(im)
-
     if not panels and bev_panel is None:
         return None
-
     summary = _compose_summary_grid(panels, bev_panel)
     out_path = out_dir / "summary.png"
     cv2.imwrite(str(out_path), summary)

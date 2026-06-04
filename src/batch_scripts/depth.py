@@ -164,6 +164,9 @@ def run_py123d_depth(sample, out_dir, depth_fill="nearest"):
     ann_path = Path(out_dir) / "nuscenes_annotations.json"
     with open(ann_path, "w") as f:
         json.dump(sample["annotations"], f)
+    gt_path = Path(out_dir) / "nuscenes_gt_3dbbox.json"
+    with open(gt_path, "w") as f:
+        json.dump(sample.get("gt_3dbbox", []), f)
 
 
 def copy_optional_annotations(scene_entry, out_dir):
@@ -241,6 +244,9 @@ if __name__ == "__main__":
                 if not (out_dir / "nuscenes_annotations.json").exists():
                     with open(out_dir / "nuscenes_annotations.json", "w") as f:
                         json.dump(sample["annotations"], f)
+                if not (out_dir / "nuscenes_gt_3dbbox.json").exists():
+                    with open(out_dir / "nuscenes_gt_3dbbox.json", "w") as f:
+                        json.dump(sample.get("gt_3dbbox", []), f)
                 continue
             run_py123d_depth(sample, out_dir, depth_fill=depth_fill)
 

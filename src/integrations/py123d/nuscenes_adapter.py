@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image
 
-from integrations.py123d.annotations import boxes_to_coco_annotations
+from integrations.py123d.annotations import boxes_to_coco_annotations, boxes_to_gt_3dbbox_cam
 from integrations.py123d.coord import (
     apply_extra_rotation,
     build_calib_dict,
@@ -180,12 +180,14 @@ def extract_frame_sample(
     annotations = boxes_to_coco_annotations(
         boxes, camera, category_map=category_map
     )
+    gt_3dbbox = boxes_to_gt_3dbbox_cam(boxes, camera, world_to_cam=world_to_cam)
 
     return {
         "image_np": image_np.astype(np.uint8),
         "points_world": points_world,
         "calib": calib,
         "annotations": annotations,
+        "gt_3dbbox": gt_3dbbox,
         "scene_id": scene_id,
         "iteration": iteration,
         "file_name": f"{scene_id}.jpg",

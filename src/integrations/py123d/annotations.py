@@ -1,9 +1,11 @@
 """Export py123d 3D boxes to COCO-style annotations for read_bounding_boxes_segmentations."""
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import cv2
 import numpy as np
+
+from integrations.py123d.coord import camera_global_to_world_to_cam
 
 # DefaultBoxDetectionLabel name -> COCO category_id (subset used by LabelAny3D util)
 DEFAULT_LABEL_TO_COCO = {
@@ -20,6 +22,31 @@ DEFAULT_LABEL_TO_COCO = {
     "OTHER": 90,
     "EGO": 90,
 }
+
+
+DEFAULT_LABEL_TO_NAME = {
+    "PERSON": "person",
+    "VEHICLE": "car",
+    "TRAIN": "train",
+    "TWO_WHEELER": "motorcycle",
+    "ANIMAL": "animal",
+    "TRAFFIC_SIGN": "traffic_sign",
+    "TRAFFIC_CONE": "traffic_cone",
+    "TRAFFIC_LIGHT": "traffic_light",
+    "BARRIER": "barrier",
+    "GENERIC_OBJECT": "object",
+    "OTHER": "object",
+    "EGO": "ego",
+}
+
+
+def _label_to_category_name(label) -> str:
+    try:
+        default = label.to_default()
+        name = default.name if hasattr(default, "name") else str(default)
+    except Exception:
+        name = str(label)
+    return DEFAULT_LABEL_TO_NAME.get(name.upper(), name.lower())
 
 
 def _label_to_category_id(label) -> int:
@@ -104,3 +131,56 @@ def boxes_to_coco_annotations(
         )
 
     return anns
+
+
+def _global_points_to_cam(points_global: np.ndarray, world_to_cam: np.ndarray) -> np.ndarray:
+    pts = np.asarray(points_global, dtype=np.float64)
+    if pts.size == 0:
+        return pts.reshape(0, 3)
+    ones = np.ones((pts.shape[0], 1), dtype=np.float64)
+    hom = np.hstack([pts, ones])
+    return (world_to_cam @ hom.T).T[:, :3]
+
+
+def boxes_to_gt_3dbbox_cam(
+    box_detections,
+    camera,
+    world_to_cam: Optional[np.ndarray] = None,
+    min_visible_corners: int = 4,
+) -> List[dict]:
+    """Export dataset GT 3D boxes in OpenCV camera frame (for BEV overlays)."""
+    if box_detections is None:
+        return []
+
+    detections = (
+        box_detections.box_detections
+        if hasattr(box_detections, "box_detections")
+        else box_detections
+    )
+    if world_to_cam is None:
+        world_to_cam = camera_global_to_world_to_cam(camera.camera_to_global_se3)
+
+    gt_boxes: List[dict] = []
+    for idx, det in enumerate(detections):
+        corners_global = np.array(det.bounding_box_se3.corners_array, dtype=np.float64)
+        _pixel_coords, in_fov, _depth = camera.project_points_global(corners_global)
+        if in_fov.sum() < min_visible_corners:
+            continue
+
+        corners_cam = _global_points_to_cam(corners_global, world_to_cam)
+        if not np.isfinite(corners_cam).all() or np.min(corners_cam[:, 2]) <= 1e-6:
+            continue
+
+        label = det.attributes.label
+        track = getattr(det.attributes, "track_token", None)
+        gt_boxes.append(
+            {
+                "obj_id": str(track) if track else str(idx),
+                "category_name": _label_to_category_name(label),
+                "category_id": int(_label_to_category_id(label)),
+                "center_cam": corners_cam.mean(axis=0).tolist(),
+                "bbox3D_cam": corners_cam.tolist(),
+                "source": "gt",
+            }
+        )
+    return gt_boxes

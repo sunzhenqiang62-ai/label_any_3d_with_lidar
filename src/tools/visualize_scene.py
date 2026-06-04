@@ -239,27 +239,181 @@ def render_pointcloud_projection(
     return out_path
 
 
-def render_bev_3d(scene_dir: Path, out_dir: Path, canvas: int = 800) -> Optional[Path]:
-    """Render a simple bird's-eye-view (X-Z) of 3D boxes."""
-    bbox_path = scene_dir / "3dbbox.json"
-    if not bbox_path.exists():
-        bbox_path = scene_dir / "3dbbox_ground.json"
-    if not bbox_path.exists():
-        return None
-    with open(bbox_path, "r") as f:
-        boxes = json.load(f)
-    if not boxes:
-        return None
+BEV_CANVAS_SIZE = 1920
 
-    # Gather XZ extents from all 3D box vertices.
-    xz_all = []
+BEV_PRED_COLOR = (220, 80, 30)
+BEV_GT_COLORS = {
+    "car": (0, 180, 0),
+    "vehicle": (0, 180, 0),
+    "person": (0, 140, 255),
+    "motorcycle": (255, 180, 0),
+    "bicycle": (255, 120, 0),
+    "traffic_light": (200, 0, 200),
+    "traffic_sign": (180, 0, 180),
+    "default": (40, 170, 170),
+}
+
+
+def _load_pred_3dbbox(scene_dir: Path) -> List[dict]:
+    for name in ("3dbbox.json", "3dbbox_ground.json"):
+        path = scene_dir / name
+        if path.exists():
+            with open(path, "r") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+    return []
+
+
+def _py123d_dataset_split_candidates(data_root: str) -> List[tuple[str, str]]:
+    logs_dir = Path(data_root) / "logs"
+    if not logs_dir.is_dir():
+        return [("nuscenes-mini", "val"), ("nuscenes", "val")]
+    out: List[tuple[str, str]] = []
+    for entry in sorted(logs_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        if name.endswith("_val"):
+            out.append((name[: -len("_val")], "val"))
+        elif name.endswith("_train"):
+            out.append((name[: -len("_train")], "train"))
+        elif name.endswith("_test"):
+            out.append((name[: -len("_test")], "test"))
+    return out or [("nuscenes-mini", "val"), ("nuscenes", "val")]
+
+
+def _fetch_gt_3dbbox_py123d(scene_dir: Path) -> List[dict]:
+    data_root = os.environ.get("PY123D_DATA_ROOT")
+    if not data_root:
+        return []
+    try:
+        from integrations.py123d.nuscenes_adapter import Py123dNuScenesLoader
+
+        scene_id = scene_dir.name
+        for dataset_name, split_type in _py123d_dataset_split_candidates(data_root):
+            try:
+                loader = Py123dNuScenesLoader(
+                    data_root=data_root,
+                    dataset_name=dataset_name,
+                    split_type=split_type,
+                    max_scenes=None,
+                )
+            except RuntimeError:
+                continue
+            for i in range(len(loader)):
+                sample = loader.extract_sample(i)
+                if sample["scene_id"] == scene_id:
+                    gt = sample.get("gt_3dbbox", [])
+                    gt_path = scene_dir / "nuscenes_gt_3dbbox.json"
+                    with open(gt_path, "w") as f:
+                        json.dump(gt, f)
+                    return gt
+    except Exception:
+        return []
+    return []
+
+
+def _load_gt_3dbbox(scene_dir: Path) -> List[dict]:
+    gt_path = scene_dir / "nuscenes_gt_3dbbox.json"
+    if gt_path.exists():
+        with open(gt_path, "r") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    return _fetch_gt_3dbbox_py123d(scene_dir)
+
+
+def _collect_valid_xz(boxes: List[dict]) -> List[np.ndarray]:
+    chunks = []
     for b in boxes:
         verts = np.asarray(b.get("bbox3D_cam", []), dtype=np.float32)
         if verts.ndim == 2 and verts.shape[1] == 3 and len(verts) >= 4:
-            xz_all.append(verts[:, [0, 2]])
-    if not xz_all:
+            if not np.isfinite(verts).all() or np.min(verts[:, 2]) <= 1e-6:
+                continue
+            chunks.append(verts[:, [0, 2]])
+    return chunks
+
+
+def _bev_gt_color(category_name: str) -> tuple[int, int, int]:
+    key = (category_name or "object").lower()
+    return BEV_GT_COLORS.get(key, BEV_GT_COLORS["default"])
+
+
+def _bev_footprint_polygon(verts: np.ndarray, to_px) -> Optional[np.ndarray]:
+    if verts.shape[0] < 4:
         return None
-    xz = np.vstack(xz_all)
+    xz = verts[:, [0, 2]].astype(np.float32)
+    hull = cv2.convexHull(xz.reshape(-1, 1, 2))
+    if hull is None or len(hull) < 3:
+        return None
+    return np.array(
+        [to_px(float(p[0]), float(p[1])) for p in hull.reshape(-1, 2)],
+        dtype=np.int32,
+    )
+
+
+def _draw_bev_boxes(
+    bev: np.ndarray,
+    boxes: List[dict],
+    to_px,
+    *,
+    color: tuple[int, int, int],
+    line_th: int,
+    center_r: int,
+    label_scale: float,
+    label_th: int,
+    label_scale_offset: float,
+    label_prefix: str = "",
+    draw_labels: bool = True,
+    use_convex_hull: bool = False,
+    bottom_face_indices: Optional[List[int]] = None,
+) -> None:
+    for b in boxes:
+        verts = np.asarray(b.get("bbox3D_cam", []), dtype=np.float32)
+        if not (verts.ndim == 2 and verts.shape[1] == 3 and len(verts) >= 4):
+            continue
+        if not np.isfinite(verts).all() or np.min(verts[:, 2]) <= 1e-6:
+            continue
+
+        if use_convex_hull and len(verts) >= 4:
+            pts = _bev_footprint_polygon(verts, to_px)
+        else:
+            idx = bottom_face_indices or [0, 1, 2, 3]
+            if len(verts) < max(idx) + 1:
+                continue
+            pts = np.array(
+                [to_px(float(verts[i, 0]), float(verts[i, 2])) for i in idx],
+                dtype=np.int32,
+            )
+        if pts is None or len(pts) < 3:
+            continue
+
+        cv2.polylines(bev, [pts], isClosed=True, color=color, thickness=line_th, lineType=cv2.LINE_AA)
+        center = b.get("center_cam", verts.mean(axis=0).tolist())
+        cpx, cpy = to_px(float(center[0]), float(center[2]))
+        cv2.circle(bev, (cpx, cpy), center_r, color, -1, lineType=cv2.LINE_AA)
+        if draw_labels:
+            label = f"{label_prefix}{b.get('obj_id', '?')}_{b.get('category_name', 'obj')}"
+            label_off = max(4, int(4 * label_scale_offset))
+            cv2.putText(
+                bev,
+                label,
+                (cpx + label_off, cpy - label_off),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                label_scale,
+                color,
+                label_th,
+                cv2.LINE_AA,
+            )
+
+
+def render_bev_3d(scene_dir: Path, out_dir: Path, canvas: int = BEV_CANVAS_SIZE) -> Optional[Path]:
+    """Render bird's-eye-view (X-Z): point cloud, dataset GT boxes, and predicted boxes."""
+    pred_boxes = _load_pred_3dbbox(scene_dir)
+    gt_boxes = _load_gt_3dbbox(scene_dir)
+    if not pred_boxes and not gt_boxes:
+        return None
+
+    xz_all = _collect_valid_xz(gt_boxes) + _collect_valid_xz(pred_boxes)
 
     # Optional BEV point cloud overlay from depth_scene.
     pc_xz = None
@@ -280,14 +434,19 @@ def render_bev_3d(scene_dir: Path, out_dir: Path, canvas: int = 800) -> Optional
             if pts.size > 0:
                 finite = np.isfinite(pts).all(axis=1)
                 pts = pts[finite]
-                if pts.shape[0] > 150000:
-                    idx = np.linspace(0, pts.shape[0] - 1, 150000, dtype=np.int64)
+                max_pts = min(400000, max(150000, canvas * canvas // 4))
+                if pts.shape[0] > max_pts:
+                    idx = np.linspace(0, pts.shape[0] - 1, max_pts, dtype=np.int64)
                     pts = pts[idx]
                 if pts.size > 0:
                     pc_xz = pts[:, [0, 2]]
-                    xz = np.vstack([xz, pc_xz])
+                    xz_all.append(pc_xz)
         except Exception:
             pc_xz = None
+
+    if not xz_all:
+        return None
+    xz = np.vstack(xz_all)
 
     xmin, zmin = np.min(xz, axis=0)
     xmax, zmax = np.max(xz, axis=0)
@@ -299,9 +458,19 @@ def render_bev_3d(scene_dir: Path, out_dir: Path, canvas: int = 800) -> Optional
     zmin -= dz * pad_ratio
     zmax += dz * pad_ratio
 
+    scale = canvas / 800.0
+    grid_n = max(11, int(11 * scale))
+    line_th = max(2, int(2 * scale))
+    center_r = max(3, int(3 * scale))
+    label_scale = 0.35 * scale
+    label_th = max(1, int(scale))
+    title_scale = 0.65 * scale
+    title_th = max(2, int(2 * scale))
+    title_y = max(24, int(24 * scale))
+    title_x = max(12, int(12 * scale))
+
     bev = np.full((canvas, canvas, 3), 245, dtype=np.uint8)
-    # Light grid.
-    for t in np.linspace(0, 1, 11):
+    for t in np.linspace(0, 1, grid_n):
         x = int(t * (canvas - 1))
         cv2.line(bev, (x, 0), (x, canvas - 1), (230, 230, 230), 1, cv2.LINE_AA)
         cv2.line(bev, (0, x), (canvas - 1, x), (230, 230, 230), 1, cv2.LINE_AA)
@@ -313,28 +482,89 @@ def render_bev_3d(scene_dir: Path, out_dir: Path, canvas: int = 800) -> Optional
         py = int(np.clip((1.0 - v) * (canvas - 1), 0, canvas - 1))
         return px, py
 
-    # Draw point cloud first (faint gray), then 3D boxes on top.
+    def xz_to_px_array(xz_pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        u = (xz_pts[:, 0] - xmin) / (xmax - xmin + 1e-8)
+        v = (xz_pts[:, 1] - zmin) / (zmax - zmin + 1e-8)
+        px = np.clip((u * (canvas - 1)).astype(np.int32), 0, canvas - 1)
+        py = np.clip(((1.0 - v) * (canvas - 1)).astype(np.int32), 0, canvas - 1)
+        return px, py
+
     if pc_xz is not None and pc_xz.shape[0] > 0:
-        for x, z in pc_xz:
-            px, py = to_px(float(x), float(z))
-            bev[py, px] = (170, 170, 170)
+        px, py = xz_to_px_array(pc_xz.astype(np.float64))
+        bev[py, px] = (170, 170, 170)
 
-    color = (30, 80, 220)
-    for b in boxes:
-        verts = np.asarray(b.get("bbox3D_cam", []), dtype=np.float32)
-        if not (verts.ndim == 2 and verts.shape[1] == 3 and len(verts) >= 8):
-            continue
-        # Bottom face in convert_box_vertices order: indices 0..3.
-        pts = np.array([to_px(float(verts[i, 0]), float(verts[i, 2])) for i in [0, 1, 2, 3]], dtype=np.int32)
-        cv2.polylines(bev, [pts], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
-        center = b.get("center_cam", [0, 0, 0])
-        cpx, cpy = to_px(float(center[0]), float(center[2]))
-        cv2.circle(bev, (cpx, cpy), 3, (20, 20, 20), -1)
-        label = f"{b.get('obj_id', '?')}_{b.get('category_name', 'obj')}"
-        cv2.putText(bev, label, (cpx + 4, cpy - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (20, 20, 20), 1, cv2.LINE_AA)
+    gt_th = max(line_th, int(line_th * 1.15))
+    for b in gt_boxes:
+        cat = (b.get("category_name") or "object").lower()
+        _draw_bev_boxes(
+            bev,
+            [b],
+            to_px,
+            color=_bev_gt_color(cat),
+            line_th=gt_th,
+            center_r=center_r,
+            label_scale=label_scale,
+            label_th=label_th,
+            label_scale_offset=scale,
+            draw_labels=False,
+            use_convex_hull=True,
+        )
 
-    title = "BEV (X-Z): point cloud + 3D boxes" if pc_xz is not None else "BEV (X-Z) with 3D boxes"
-    cv2.putText(bev, title, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (20, 20, 20), 2, cv2.LINE_AA)
+    if pred_boxes:
+        _draw_bev_boxes(
+            bev,
+            pred_boxes,
+            to_px,
+            color=BEV_PRED_COLOR,
+            line_th=line_th,
+            center_r=center_r,
+            label_scale=label_scale,
+            label_th=label_th,
+            label_scale_offset=scale,
+            label_prefix="Pred:",
+            bottom_face_indices=[0, 1, 2, 3],
+        )
+
+    parts = ["BEV (X-Z)"]
+    if pc_xz is not None:
+        parts.append("point cloud")
+    if gt_boxes:
+        parts.append(f"GT={len(gt_boxes)}")
+    if pred_boxes:
+        parts.append(f"Pred={len(pred_boxes)}")
+    title = ", ".join(parts)
+    cv2.putText(
+        bev,
+        title,
+        (title_x, title_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        title_scale,
+        (20, 20, 20),
+        title_th,
+        cv2.LINE_AA,
+    )
+
+    legend_y = title_y + int(28 * scale)
+    legend_items = [
+        ("Pred", BEV_PRED_COLOR),
+        ("GT car", BEV_GT_COLORS["car"]),
+        ("GT person", BEV_GT_COLORS["person"]),
+        ("GT other", BEV_GT_COLORS["default"]),
+    ]
+    lx = title_x
+    for text, col in legend_items:
+        cv2.rectangle(bev, (lx, legend_y - 10), (lx + 18, legend_y + 4), col, -1)
+        cv2.putText(
+            bev,
+            text,
+            (lx + 24, legend_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            label_scale * 0.9,
+            (30, 30, 30),
+            label_th,
+            cv2.LINE_AA,
+        )
+        lx += int(140 * scale)
     out_path = out_dir / "bev_3d.png"
     cv2.imwrite(str(out_path), bev)
     return out_path
@@ -450,8 +680,70 @@ def render_mesh_overlay(
     return out_path
 
 
+def _resize_to_height(im: np.ndarray, target_h: int) -> np.ndarray:
+    scale = target_h / im.shape[0]
+    return cv2.resize(im, (int(im.shape[1] * scale), target_h))
+
+
+def _pad_panel_to_width(im: np.ndarray, width: int) -> np.ndarray:
+    h, w = im.shape[:2]
+    if w == width:
+        return im
+    if w > width:
+        x0 = (w - width) // 2
+        return im[:, x0 : x0 + width]
+    pad = width - w
+    left = pad // 2
+    right = pad - left
+    return cv2.copyMakeBorder(im, 0, 0, left, right, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+
+
+def _compose_summary_grid(
+    panels: List[np.ndarray],
+    bev_panel: Optional[np.ndarray],
+    *,
+    target_h: int = 360,
+    cols: int = 3,
+) -> np.ndarray:
+    """Layout: ``cols`` panels per row; optional BEV row spans full row width below."""
+    if not panels and bev_panel is None:
+        raise ValueError("No panels to compose")
+
+    resized = [_resize_to_height(im, target_h) for im in panels]
+    cell_w = max(im.shape[1] for im in resized) if resized else target_h
+    row_width = cell_w * cols
+
+    rows: List[np.ndarray] = []
+    for i in range(0, len(resized), cols):
+        row_cells = [
+            _pad_panel_to_width(im, cell_w) for im in resized[i : i + cols]
+        ]
+        while len(row_cells) < cols:
+            row_cells.append(np.zeros((target_h, cell_w, 3), dtype=np.uint8))
+        row = np.hstack(row_cells)
+        if row.shape[1] < row_width:
+            row = _pad_panel_to_width(row, row_width)
+        rows.append(row)
+
+    if bev_panel is not None:
+        bev_scale = row_width / bev_panel.shape[1]
+        bev_h = max(1, int(bev_panel.shape[0] * bev_scale))
+        interp = cv2.INTER_AREA if bev_scale < 1.0 else cv2.INTER_CUBIC
+        bev_row = cv2.resize(bev_panel, (row_width, bev_h), interpolation=interp)
+        rows.append(bev_row)
+
+    if not rows:
+        bev_scale = row_width / bev_panel.shape[1]
+        bev_h = max(1, int(bev_panel.shape[0] * bev_scale))
+        interp = cv2.INTER_AREA if bev_scale < 1.0 else cv2.INTER_CUBIC
+        return cv2.resize(bev_panel, (row_width, bev_h), interpolation=interp)
+
+    return np.vstack(rows)
+
+
 def render_compose(scene_dir: Path, out_dir: Path, modes: List[str]) -> Optional[Path]:
-    panels = []
+    panels: List[np.ndarray] = []
+    bev_panel: Optional[np.ndarray] = None
     for mode in modes:
         if mode == "gt_2d":
             p = render_gt_2d(scene_dir, out_dir)
@@ -471,17 +763,18 @@ def render_compose(scene_dir: Path, out_dir: Path, modes: List[str]) -> Optional
         else:
             p = None
         if p and p.exists():
-            panels.append(cv2.imread(str(p)))
+            im = cv2.imread(str(p))
+            if im is None:
+                continue
+            if mode == "bev_3d":
+                bev_panel = im
+            else:
+                panels.append(im)
 
-    if not panels:
+    if not panels and bev_panel is None:
         return None
 
-    target_h = 360
-    resized = []
-    for im in panels:
-        scale = target_h / im.shape[0]
-        resized.append(cv2.resize(im, (int(im.shape[1] * scale), target_h)))
-    summary = np.hstack(resized)
+    summary = _compose_summary_grid(panels, bev_panel)
     out_path = out_dir / "summary.png"
     cv2.imwrite(str(out_path), summary)
     return out_path

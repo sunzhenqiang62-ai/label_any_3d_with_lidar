@@ -211,7 +211,11 @@ def build_scene_outputs(
     K = calib["K"]
     world_to_cam = calib["world_to_cam"]
     c2w = calib["c2w"]
-    H, W = calib["H"], calib["W"]
+    # Accept both legacy LabelAny3D keys (H/W) and py123d-style keys (height/width).
+    H = calib.get("H", calib.get("height"))
+    W = calib.get("W", calib.get("width"))
+    if H is None or W is None:
+        raise KeyError("Calibration must include H/W or height/width")
 
     points = points_world
     if calib.get("points_in_sensor_frame") and calib.get("sensor_to_world") is not None:

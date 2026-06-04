@@ -48,7 +48,6 @@ if __name__ == "__main__":
         scene_entry = loader.get_scene_by_index(i)
         output_dir = scene_entry["scene_dir"]
         opt.scene.attributes.img_path = scene_entry["image_path"]
-        opt.run.amodal_completion = "our"
         scene = get_scene(opt.scene.type, opt.scene.attributes)
 
         out_dir = Path(output_dir)

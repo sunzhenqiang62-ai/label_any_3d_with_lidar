@@ -13,6 +13,9 @@ Based on [UVA LabelAny3D](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D)
 | **Skip finished scenes** | Resume when `depth_map.npy` + `cam_params.json` already exist |
 | **Sparse LiDAR** | `--depth_fill nearest` fills empty depth pixels before alignment |
 | **CPU smoke tests** | `test_lidar_depth_smoke.py`, `test_py123d_coord.py`, `test_py123d_annotations.py` |
+| **Scene visualization** | `visualize_scene.py`: 3×N summary grid, high-res BEV with GT (color) + Pred (blue) |
+| **GT 3D boxes (py123d)** | `nuscenes_gt_3dbbox.json` per scene; BEV GT footprints without text labels |
+| **Model-based crops** | OneFormer segmentation/tagging; `allowed_categories: ['car', 'person']` in configs |
 
 ### New / modified files (fork)
 
@@ -32,6 +35,7 @@ docs/PY123D_NUSCENES.md
 docs/NUSCENES_EXPERIMENT.md
 scripts/run_nuscenes.sh
 requirements-py123d.txt                # optional: pip install -r requirements-py123d.txt
+env.sh                                 # helper to activate la3d env + CUDA toolchain
 ```
 
 Modified: `src/batch_scripts/depth.py`, `src/batch_scripts/get_crops_enhanced.py`, `src/dataset_model/BaseScene.py`, `PointCloudScene.py`
@@ -79,9 +83,67 @@ python batch_scripts/run_nuscenes.py --preset smoke --skip_existing --visualize 
 python tools/visualize_scene.py --root ../experimental_results/nuScenes/nuscenes_val --mode compose
 ```
 
+`compose` builds `viz/summary.png`: **3 panels per row**, full-width **BEV** on the last row (GT by color, Pred in blue).
+
 Pipeline order: `depth` → `enhance` → `crops` → `completion` → `elevation` → `reconstruction` → `whole`. All nuScenes steps use `--data_backend py123d`.
 
 Details: [nuScenes experiment](docs/NUSCENES_EXPERIMENT.md) · [COCO Pipeline](docs/COCO_PIPELINE.md) · [LiDAR](docs/LIDAR_INPUT.md) · [py123d nuScenes](docs/PY123D_NUSCENES.md)
+
+### nuScenes smoke visualization
+
+One-scene `nuscenes-mini` smoke run with **py123d LiDAR depth**, **OneFormer** (`car` / `person`), TRELLIS meshes, and **GT + predicted 3D boxes** in BEV.
+
+![nuScenes OneFormer smoke summary](docs/assets/nuscenes_oneformer_smoke_summary.png)
+
+Layout: row 1 — GT 2D, depth, crops; row 2 — 3D boxes, mesh projection, LiDAR projection; row 3 — full-width BEV (colored GT, blue Pred).
+
+Older examples: [summary](docs/assets/nuscenes_smoke_summary.png) · [mesh](docs/assets/nuscenes_mesh_overlay.png) · [BEV](docs/assets/nuscenes_bev_3d.png)
+
+---
+
+## Environment verification (2026-05-27)
+
+The environment in this workspace has been validated end-to-end with the following setup:
+
+- Conda env: `la3d` (`python=3.10`)
+- PyTorch: `2.2.2+cu121`
+- Optional acceleration packages: `flash-attn==2.7.4.post1`, `xformers==0.0.25.post1`, `kaolin==0.17.0`
+- TRELLIS deps verified: `spconv`, `nvdiffrast`, `pytorch3d`, `detectron2`
+
+### Activate the environment
+
+```bash
+source env.sh
+cd src
+```
+
+### TRELLIS offline smoke test (local snapshot)
+
+If your network is restricted, run TRELLIS from a local Hugging Face snapshot:
+
+```bash
+cd external/TRELLIS
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python - <<'PY'
+import os
+os.environ['ATTN_BACKEND'] = 'xformers'
+os.environ['SPCONV_ALGO'] = 'native'
+from PIL import Image
+from trellis.pipelines import TrellisImageTo3DPipeline
+
+model_path = '/root/.cache/huggingface/hub/models--JeffreyXiang--TRELLIS-image-large/snapshots/25e0d31ffbebe4b5a97464dd851910efc3002d96'
+pipeline = TrellisImageTo3DPipeline.from_pretrained(model_path)
+pipeline.cuda()
+outputs = pipeline.run(
+    Image.open('assets/example_image/T.png'),
+    seed=1,
+    sparse_structure_sampler_params={'steps': 1, 'cfg_strength': 1.0},
+    slat_sampler_params={'steps': 1, 'cfg_strength': 1.0},
+)
+print(outputs.keys())
+PY
+```
+
+Expected output keys include: `mesh`, `gaussian`, `radiance_field`.
 
 ---
 

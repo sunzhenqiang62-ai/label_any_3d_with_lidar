@@ -359,6 +359,13 @@ def get_maximum_height(binary_mask):
     max_height = non_zero_row_indices[-1] - non_zero_row_indices[0] + 1
     return max_height
 
+def _min_height_ratio_for_category(category_id):
+    # Keep the default conservative filter, but allow smaller distant road
+    # vehicles in nuScenes-style data to enter the reconstruction pipeline.
+    vehicle_category_ids = {3, 4, 6, 7, 8}  # car, motorcycle, bus, train, truck
+    return 0.03 if category_id in vehicle_category_ids else 0.0625
+
+
 def read_bounding_boxes_segmentations(annotations_path_or_list, image_size):
     """
     Reads bounding box and segmentation mask data and returns a list of bounding boxes.
@@ -397,7 +404,8 @@ def read_bounding_boxes_segmentations(annotations_path_or_list, image_size):
                 mask, height = create_boolean_mask_from_polygon(image_size, seg)
 
             is_truncated, is_scaleable = analyze_mask(mask, image_size)
-            if (height/image_size[1] > 0.0625 and not is_truncated and is_scaleable): # object must be 6.25% of the orginal image height
+            min_height_ratio = _min_height_ratio_for_category(annotation["category_id"])
+            if (height/image_size[1] > min_height_ratio and not is_truncated and is_scaleable):
                 segmentation_mask.append(mask)
                 category_ids.append(annotation["category_id"])
                 bboxes.append(annotation["bbox"])  # Add the bbox to the list

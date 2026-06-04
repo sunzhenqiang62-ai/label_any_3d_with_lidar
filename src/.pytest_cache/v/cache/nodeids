@@ -1,0 +1,11 @@
+[
+  "tests/test_lidar_depth_smoke.py::test_build_outputs",
+  "tests/test_lidar_depth_smoke.py::test_manifest_loader_integration",
+  "tests/test_lidar_depth_smoke.py::test_rasterize_roundtrip",
+  "tests/test_pipeline_loader.py::test_py123d_loader_filters_scenes",
+  "tests/test_pipeline_loader.py::test_resolve_py123d_split",
+  "tests/test_pipeline_loader.py::test_setup_pipeline_loop_py123d",
+  "tests/test_py123d_annotations.py::test_boxes_to_coco",
+  "tests/test_py123d_integration.py::test_py123d_loader_one_scene",
+  "tests/test_visualize_smoke.py::test_render_depth_only"
+]

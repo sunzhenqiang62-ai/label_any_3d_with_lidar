@@ -177,6 +177,10 @@ def build_step_cmd(
         )
         if args.py123d_data_root:
             cmd.extend(["--py123d_data_root", args.py123d_data_root])
+        if args.py123d_dataset:
+            cmd.extend(["--py123d_dataset", args.py123d_dataset])
+        if args.py123d_split:
+            cmd.extend(["--py123d_split", args.py123d_split])
         if args.py123d_max_scenes is not None:
             cmd.extend(["--py123d_max_scenes", str(args.py123d_max_scenes)])
     elif step == "combine":
@@ -200,7 +204,7 @@ def build_step_cmd(
             ]
         )
 
-    if args.extra_args:
+    if args.extra_args and step != "combine":
         cmd.extend(args.extra_args.split())
     return cmd
 
@@ -240,6 +244,8 @@ def main():
     parser.add_argument("--end_index", type=int, default=-1)
     parser.add_argument("--gpu_idx", type=int, default=0)
     parser.add_argument("--py123d_data_root", default=os.environ.get("PY123D_DATA_ROOT"))
+    parser.add_argument("--py123d_dataset", default=None)
+    parser.add_argument("--py123d_split", default=None)
     parser.add_argument("--py123d_max_scenes", type=int, default=None)
     parser.add_argument("--skip_existing", action="store_true")
     parser.add_argument(

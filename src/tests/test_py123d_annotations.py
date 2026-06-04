@@ -93,6 +93,16 @@ def test_boxes_to_coco():
     assert anns[0]["category_id"] == 1
 
 
+def test_boxes_to_gt_3dbbox_cam():
+    from integrations.py123d.annotations import boxes_to_gt_3dbbox_cam
+
+    cam = _FakeCamera()
+    gt = boxes_to_gt_3dbbox_cam([_FakeDet()], cam)
+    assert len(gt) == 1 and gt[0]["source"] == "gt"
+    assert np.min(np.array(gt[0]["bbox3D_cam"])[:, 2]) > 0
+
+
 if __name__ == "__main__":
     test_boxes_to_coco()
+    test_boxes_to_gt_3dbbox_cam()
     print("test_py123d_annotations: OK")

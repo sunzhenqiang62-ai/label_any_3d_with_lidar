@@ -24,12 +24,33 @@ def _has_py123d_data():
     return logs.exists()
 
 
+def _make_loader():
+    """Build a loader for whichever nuScenes dataset exists in PY123D logs."""
+    from integrations.py123d.nuscenes_adapter import Py123dNuScenesLoader
+
+    # Optional explicit override for CI/local setups.
+    preferred = os.environ.get("PY123D_DATASET")
+    candidates = [preferred] if preferred else ["nuscenes", "nuscenes-mini"]
+
+    last_error = None
+    for dataset_name in candidates:
+        try:
+            return Py123dNuScenesLoader(dataset_name=dataset_name, max_scenes=1)
+        except RuntimeError as exc:
+            last_error = exc
+            continue
+
+    raise RuntimeError(
+        f"No py123d scenes found for datasets={candidates}. "
+        f"Set PY123D_DATASET to match your converted logs. Last error: {last_error}"
+    )
+
+
 @pytest.mark.skipif(not _has_py123d_data(), reason="PY123D_DATA_ROOT/logs not available")
 def test_py123d_loader_one_scene():
     pytest.importorskip("py123d")
-    from integrations.py123d.nuscenes_adapter import Py123dNuScenesLoader
 
-    loader = Py123dNuScenesLoader(max_scenes=1)
+    loader = _make_loader()
     sample = loader.extract_sample(0)
     assert sample["image_np"].ndim == 3
     assert sample["points_world"].shape[1] == 3

@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from util import restore_mask_from_crop, align_to_depth_match, draw_cube
-from util_3dbox import save_3d_with_ground_alignment_bbox
+from util_3dbox import save_3d_with_ground_alignment_bbox, save_3d_bbox_from_depth_fallback
 from matching.process_image_space import load_model
 from batch_scripts.pipeline_loader import setup_pipeline_loop
 
@@ -63,10 +63,6 @@ if __name__ == "__main__":
 
         if (out_dir / "3dbbox.json").exists():
             continue
-        with open(out_dir / "cam_params.json", "r") as fp:
-            cam_params = json.load(fp)
-        K_img = np.array(cam_params["K"])
-        pose = np.array(cam_params["c2w"])
         depth_map = np.load(out_dir / "depth_map.npy")
 
         scene_mesh = trimesh.Scene([None])
@@ -109,12 +105,12 @@ if __name__ == "__main__":
                 print(f"Error aligning {obj_id}: {e}")
                 continue
             obj_mesh.apply_transform(transform)
-            obj_mesh.apply_transform(pose)
-
+            # align_to_depth_match uses PyTorch3D camera coordinates. Convert the
+            # mesh to OpenCV camera coordinates expected by cam_params/K and
+            # downstream bbox3D_cam consumers.
             convention_transform = np.array(
                 [[-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
             )
-
             obj_mesh.apply_transform(convention_transform)
 
             obj_mesh.export(out_dir / "reconstruction" / f"{obj_id}.glb")
@@ -129,7 +125,10 @@ if __name__ == "__main__":
             scene_mesh.export(out_dir / "reconstruction" / "full_scene.glb")
 
             print("Going to save ground aligned bbox")
-            save_3d_with_ground_alignment_bbox(out_dir)
+            bbox_list = save_3d_with_ground_alignment_bbox(out_dir)
+            if len(bbox_list) == 0:
+                print("Mesh-based bbox is empty; using depth fallback bbox.")
+                bbox_list = save_3d_bbox_from_depth_fallback(out_dir)
             draw_cube(out_dir, is_ground=True)
 
             if os.path.exists(out_dir / "3dbbox_ground.json"):

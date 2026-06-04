@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image
 
-from integrations.py123d.annotations import boxes_to_coco_annotations
+from integrations.py123d.annotations import boxes_to_coco_annotations, boxes_to_gt_3dbbox_cam
 from integrations.py123d.coord import (
     apply_extra_rotation,
     build_calib_dict,
@@ -71,6 +71,53 @@ def _scene_iteration(scene_api, frame_index: Optional[int]) -> int:
     return meta.num_history_iterations
 
 
+def _transform_points(points: np.ndarray, transform_4x4: np.ndarray) -> np.ndarray:
+    if points.size == 0:
+        return points.reshape(0, 3)
+    ones = np.ones((points.shape[0], 1), dtype=np.float64)
+    homogeneous = np.hstack([points, ones])
+    return (transform_4x4 @ homogeneous.T).T[:, :3]
+
+
+def _pose_to_matrix(pose_obj) -> np.ndarray:
+    """py123d PoseSE3-like object -> 4x4 matrix."""
+    if pose_obj is None:
+        raise ValueError("pose_obj is None")
+    if hasattr(pose_obj, "transformation_matrix"):
+        return np.asarray(pose_obj.transformation_matrix, dtype=np.float64)
+    raise TypeError(f"Unsupported pose object: {type(pose_obj)}")
+
+
+def _ego_points_to_global(scene_api, iteration: int, points_ego: np.ndarray) -> np.ndarray:
+    """
+    Convert py123d nuScenes lidar points from ego/IMU frame to global frame.
+
+    py123d loads nuScenes .pcd.bin points and internally applies lidar_to_imu_se3,
+    so lidar.point_cloud_3d is already in the vehicle/ego frame.
+    """
+    ego_state = scene_api.get_ego_state_se3_at_iteration(iteration)
+    if ego_state is None:
+        raise RuntimeError("Missing ego state for ego->global conversion")
+    imu_to_global = _pose_to_matrix(getattr(ego_state, "imu_se3", None))
+    return _transform_points(points_ego, imu_to_global)
+
+
+def _count_projectable(points_cam: np.ndarray, K: np.ndarray, width: int, height: int) -> int:
+    if points_cam.size == 0:
+        return 0
+    z = points_cam[:, 2]
+    valid = z > 1e-6
+    if not np.any(valid):
+        return 0
+    x = points_cam[valid, 0]
+    y = points_cam[valid, 1]
+    z = z[valid]
+    u = K[0, 0] * x / z + K[0, 2]
+    v = K[1, 1] * y / z + K[1, 2]
+    in_bounds = (u >= 0) & (u < width) & (v >= 0) & (v < height)
+    return int(np.sum(in_bounds))
+
+
 def extract_frame_sample(
     scene_api,
     camera_key: str = "CAM_FRONT",
@@ -117,6 +164,8 @@ def extract_frame_sample(
         )
 
     K = pinhole_intrinsics_to_K(camera.metadata)
+    # camera_to_global_se3 includes the camera sample_data ego pose and camera
+    # calibration, matching nuScenes devkit's global -> camera-ego -> camera chain.
     world_to_cam = camera_global_to_world_to_cam(camera.camera_to_global_se3)
     world_to_cam = apply_extra_rotation(world_to_cam, extra_rot_4x4)
 
@@ -124,18 +173,21 @@ def extract_frame_sample(
         K, camera.metadata.width, camera.metadata.height, world_to_cam
     )
 
-    points_world = np.array(lidar.point_cloud_3d, dtype=np.float64)
+    points_raw = np.array(lidar.point_cloud_3d, dtype=np.float64)
+    points_world = _ego_points_to_global(scene_api, iteration, points_raw)
 
     boxes = scene_api.get_box_detections_se3_at_iteration(iteration)
     annotations = boxes_to_coco_annotations(
         boxes, camera, category_map=category_map
     )
+    gt_3dbbox = boxes_to_gt_3dbbox_cam(boxes, camera, world_to_cam=world_to_cam)
 
     return {
         "image_np": image_np.astype(np.uint8),
         "points_world": points_world,
         "calib": calib,
         "annotations": annotations,
+        "gt_3dbbox": gt_3dbbox,
         "scene_id": scene_id,
         "iteration": iteration,
         "file_name": f"{scene_id}.jpg",

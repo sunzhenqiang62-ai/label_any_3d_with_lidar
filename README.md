@@ -125,13 +125,13 @@ Details: [nuScenes experiment](docs/NUSCENES_EXPERIMENT.md) · [COCO Pipeline](d
 
 ### nuScenes smoke visualization
 
-One-scene `nuscenes-mini` smoke run with **py123d LiDAR depth**, **OneFormer** (`car` / `person`), TRELLIS meshes, and **GT + predicted 3D boxes** in BEV.
+One-scene `nuscenes-mini` smoke run with **fuse depth** (LiDAR + MoGe/DepthPro), **LocateAnything** 2D detection, **OneFormer crop refinement** (`car` / `person`), and **GT + predicted 3D boxes** in BEV.
 
-![nuScenes OneFormer smoke summary](docs/assets/nuscenes_oneformer_smoke_summary.png)
+![nuScenes LocateAnything smoke summary](docs/assets/nuscenes_locateanything_smoke_summary.png)
 
-Layout: row 1 — GT 2D, depth, crops; row 2 — 3D boxes, mesh projection, LiDAR projection; row 3 — full-width BEV with distance grid (colored GT, blue Pred).
+Layout: row 1 — GT 2D, depth, crops; row 2 — 3D boxes, point cloud projection; row 3 — full-width BEV with meter distance grid (colored GT, blue Pred).
 
-Older examples: [summary](docs/assets/nuscenes_smoke_summary.png) · [mesh](docs/assets/nuscenes_mesh_overlay.png) · [BEV](docs/assets/nuscenes_bev_3d.png)
+Older examples: [OneFormer smoke](docs/assets/nuscenes_oneformer_smoke_summary.png) · [summary](docs/assets/nuscenes_smoke_summary.png) · [mesh](docs/assets/nuscenes_mesh_overlay.png) · [BEV](docs/assets/nuscenes_bev_3d.png)
 
 ### Recent updates (2026-06)
 

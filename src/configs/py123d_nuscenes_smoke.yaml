@@ -24,13 +24,19 @@ run:
     lidar_key: 'merged'
     frame_index: null
     max_scenes: 5
+  detection_source: 'model'  # model | gt (projected nuScenes boxes)
   segmentation:
-    holistic: 'entityv2'
-    fg_bg: 'clipseg'
+    holistic: 'oneformer'  # entityv2 | oneformer | locateanything
+    fg_bg: 'gt'
+    allowed_categories: ['car', 'person']
+    locateanything:
+      model_path: 'nvidia/LocateAnything-3B'
+      generation_mode: 'hybrid'
+      categories: ['person', 'car', 'truck', 'bus', 'motorcycle', 'bicycle', 'traffic_light']
     merge_masks:
       dilation: 7
       threshold: 0.5
-    tagger: 'ovsam'
+    tagger: 'oneformer'
   calibration:
     intrinsics: 'gt'
     pose: 'gt'

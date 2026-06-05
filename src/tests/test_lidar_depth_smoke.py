@@ -13,7 +13,15 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from geometry.lidar_depth import build_scene_outputs, load_calib, load_pointcloud, rasterize_depth, transform_points
+from geometry.lidar_depth import (
+    build_scene_outputs,
+    compute_lidar_depth,
+    fuse_lidar_with_estimate,
+    load_calib,
+    load_pointcloud,
+    rasterize_depth,
+    transform_points,
+)
 
 
 def make_synthetic_scene(tmp: Path):
@@ -91,6 +99,58 @@ def test_build_outputs():
     print("build_outputs: OK")
 
 
+def test_fuse_lidar_estimate():
+    tmp = Path(tempfile.mkdtemp())
+    img, K, H, W, points_world = make_synthetic_scene(tmp)
+    calib = load_calib(tmp / "calib.json")
+    computed = compute_lidar_depth(img, points_world, calib, depth_fill="none")
+    estimate = np.full((H, W), 8.0, dtype=np.float32)
+    fused, fused_valid = fuse_lidar_with_estimate(
+        computed["depth_map"],
+        computed["valid_mask"],
+        estimate,
+        align=False,
+    )
+    assert computed["valid_mask"].sum() > 0
+    assert np.allclose(fused[computed["valid_mask"]], 5.0, atol=0.05)
+    assert np.allclose(fused[~computed["valid_mask"]], 8.0, atol=1e-3)
+    assert fused_valid.all()
+    print("fuse_lidar_estimate: OK")
+
+
+def test_fuse_lidar_estimate_with_align():
+    def scale_align(estimate, lidar, mask=None, apply_mask=None):
+        fit = np.asarray(mask, dtype=bool)
+        apply = (
+            np.asarray(apply_mask, dtype=bool)
+            if apply_mask is not None
+            else fit
+        )
+        scale = np.median(lidar[fit] / estimate[fit])
+        out = estimate.copy()
+        out[apply] = estimate[apply] * scale
+        return out.astype(np.float32)
+
+    tmp = Path(tempfile.mkdtemp())
+    img, K, H, W, points_world = make_synthetic_scene(tmp)
+    calib = load_calib(tmp / "calib.json")
+    computed = compute_lidar_depth(img, points_world, calib, depth_fill="none")
+    estimate = np.full((H, W), 2.0, dtype=np.float32)
+    fused, fused_valid = fuse_lidar_with_estimate(
+        computed["depth_map"],
+        computed["valid_mask"],
+        estimate,
+        align=True,
+        align_fn=scale_align,
+    )
+    holes = ~computed["valid_mask"]
+    assert np.allclose(fused[computed["valid_mask"]], 5.0, atol=0.05)
+    assert not np.any(fused[holes] >= 9999.0)
+    assert np.allclose(fused[holes], 5.0, atol=0.05)
+    assert fused_valid.all()
+    print("fuse_lidar_estimate_with_align: OK")
+
+
 def test_manifest_loader_integration():
     from batch_scripts.lidar_loader import LidarManifestLoader
 
@@ -106,5 +166,7 @@ def test_manifest_loader_integration():
 if __name__ == "__main__":
     test_rasterize_roundtrip()
     test_build_outputs()
+    test_fuse_lidar_estimate()
+    test_fuse_lidar_estimate_with_align()
     test_manifest_loader_integration()
     print("All LiDAR depth smoke tests passed.")

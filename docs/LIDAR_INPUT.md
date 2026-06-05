@@ -103,6 +103,31 @@ python batch_scripts/depth.py ... --depth_fill nearest
 
 Or set `run.depth.fill: nearest` in `configs/lidar.yaml`.
 
+## Fuse mode (LiDAR prior + vision fill)
+
+Use metric LiDAR where projected points exist; fill remaining pixels with MoGe + DepthPro:
+
+```bash
+python batch_scripts/depth.py \
+  --depth_source fuse \
+  --manifest ../dataset/lidar/manifest.json \
+  --config configs/lidar.yaml \
+  --depth_fill none \
+  --save_dir ../experimental_results/LiDAR_fuse/
+```
+
+For nuScenes via py123d (no manifest):
+
+```yaml
+run:
+  depth:
+    source: fuse
+    fill: none
+    fuse_align: true
+```
+
+Preset: `configs/py123d_nuscenes_fuse.yaml`. Requires GPU for DepthPro/MoGe.
+
 ## Outputs (per scene)
 
 Same layout as the COCO pipeline depth step:

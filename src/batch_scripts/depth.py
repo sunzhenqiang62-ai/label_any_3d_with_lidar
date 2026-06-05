@@ -5,6 +5,7 @@ Modes:
   estimate (default): MoGe + DepthPro + RANSAC alignment
   lidar: world-frame LiDAR + calibration -> depth_map / PLY / cam_params
   py123d: nuScenes (etc.) via py123d Arrow logs -> depth_map + nuscenes_annotations.json
+  fuse: LiDAR metric depth where valid + MoGe/DepthPro fill for holes (py123d or manifest)
 
 Usage:
     python batch_scripts/depth.py --start_index 0 --end_index 100 --split val
@@ -28,7 +29,14 @@ from PIL import Image
 from util import depth_to_points
 from batch_scripts.coconut_loader import CoconutLoader, get_dataset_paths
 from batch_scripts.lidar_loader import LidarManifestLoader, get_lidar_save_split
-from geometry.lidar_depth import build_scene_outputs, load_calib, load_pointcloud
+from geometry.lidar_depth import (
+    build_scene_outputs,
+    compute_lidar_depth,
+    fuse_lidar_with_estimate,
+    load_calib,
+    load_pointcloud,
+    write_depth_artifacts,
+)
 
 
 def save_moge_data(image, points, depth, mask, save_path):
@@ -50,37 +58,47 @@ def save_moge_data(image, points, depth, mask, save_path):
     save_ply(save_path / 'depth_scene_no_edge.ply', vertices, faces, vertex_colors)
 
 
-def align_depth(relative_depth, metric_depth, mask=None, min_samples=0.2, max_valid_depth=400.0):
+def align_depth(
+    relative_depth,
+    metric_depth,
+    mask=None,
+    apply_mask=None,
+    min_samples=0.2,
+    max_valid_depth=400.0,
+):
     """
     Align scale-invariant depth to metric depth using RANSAC linear regression.
+
+    ``mask`` selects pixels used to fit the scale. ``apply_mask`` selects where
+    the fitted scale is written; defaults to ``mask`` (MoGe+DepthPro path) or all
+    finite relative depths when ``mask`` is None.
     """
     from sklearn.linear_model import RANSACRegressor, LinearRegression
 
     regressor = RANSACRegressor(estimator=LinearRegression(fit_intercept=False), min_samples=min_samples)
 
-    valid = (~np.isinf(relative_depth)) & (metric_depth < max_valid_depth)
+    fit_valid = (~np.isinf(relative_depth)) & (metric_depth < max_valid_depth)
     if mask is not None:
-        valid &= mask
+        fit_valid &= mask
 
-    if valid.sum() == 0:
+    if fit_valid.sum() == 0:
         print("Warning: No valid points for alignment. Returning metric depth.")
         return metric_depth
 
     try:
-        regressor.fit(relative_depth[valid].reshape(-1, 1), metric_depth[valid].reshape(-1, 1))
+        regressor.fit(relative_depth[fit_valid].reshape(-1, 1), metric_depth[fit_valid].reshape(-1, 1))
     except Exception as e:
         print(f"Error fitting RANSACRegressor: {e}, using metric depth directly")
         return metric_depth
 
-    depth = np.full_like(relative_depth, 10000.0)
+    if apply_mask is None:
+        apply_mask = mask if mask is not None else ~np.isinf(relative_depth)
 
-    if mask is not None:
-        masked_pred = regressor.predict(relative_depth[mask].reshape(-1, 1)).flatten()
-        depth[mask] = masked_pred
-    else:
-        valid_mask = ~np.isinf(relative_depth)
-        masked_pred = regressor.predict(relative_depth[valid_mask].reshape(-1, 1)).flatten()
-        depth[valid_mask] = masked_pred
+    depth = np.full_like(relative_depth, 10000.0)
+    apply_mask = np.asarray(apply_mask, dtype=bool)
+    if apply_mask.any():
+        masked_pred = regressor.predict(relative_depth[apply_mask].reshape(-1, 1)).flatten()
+        depth[apply_mask] = masked_pred
 
     return depth
 
@@ -115,18 +133,54 @@ def run_lidar_depth(scene, out_dir, depth_fill="none"):
     )
 
 
-def run_estimate_depth(scene, out_dir, depthpro_model, depthpro_transform):
-    """MoGe + DepthPro depth estimation (original pipeline)."""
+def _moge_depthpro_depth(scene, out_dir, depthpro_model, depthpro_transform, f_px=None):
     sys.path = ['./', '../external/MoGe'] + [p for p in sys.path if p not in ('./', '../external/MoGe')]
     from infer_moge import infer_geometry_on_image
 
     _, moge_depth_map, moge_mask, K_img = infer_geometry_on_image(f'{out_dir}/input.png', out_dir)
-
+    if f_px is None:
+        f_px = float(K_img[0, 0])
     img = depthpro_transform(scene.image_pil)
-    prediction = depthpro_model.infer(img, f_px=K_img[0, 0])
+    f_px_tensor = (
+        torch.tensor([float(f_px)], dtype=torch.float32, device=img.device)
+        if f_px is not None
+        else None
+    )
+    prediction = depthpro_model.infer(img, f_px=f_px_tensor)
     pro_depth_map = prediction["depth"].cpu().numpy()
-
     depth_map = align_depth(moge_depth_map, pro_depth_map, mask=moge_mask)
+    return depth_map.astype(np.float32), moge_mask, K_img
+
+
+def _resize_depth_to_image(depth_map, mask, image_np):
+    H, W = image_np.shape[:2]
+    if depth_map.shape == (H, W):
+        return depth_map, mask
+    depth_map = np.array(
+        Image.fromarray(depth_map.astype(np.float32)).resize((W, H), Image.NEAREST)
+    )
+    mask = np.array(
+        Image.fromarray(mask.astype(np.uint8)).resize((W, H), Image.NEAREST)
+    ) > 0
+    return depth_map, mask
+
+
+def run_estimate_depth_maps(scene, out_dir, depthpro_model, depthpro_transform, f_px=None):
+    """MoGe + DepthPro; returns dense metric depth (H,W) aligned to image size."""
+    depth_map, moge_mask, _ = _moge_depthpro_depth(
+        scene, out_dir, depthpro_model, depthpro_transform, f_px=f_px
+    )
+    depth_map, moge_mask = _resize_depth_to_image(depth_map, moge_mask, scene.image_np)
+    return depth_map, moge_mask
+
+
+def run_estimate_depth(scene, out_dir, depthpro_model, depthpro_transform):
+    """MoGe + DepthPro depth estimation (original pipeline)."""
+    depth_map, moge_mask, K_img = _moge_depthpro_depth(
+        scene, out_dir, depthpro_model, depthpro_transform
+    )
+    depth_map, moge_mask = _resize_depth_to_image(depth_map, moge_mask, scene.image_np)
+
     pts3d = depth_to_points(depth_map[None], K_img)
     save_moge_data(scene.image_np, pts3d, depth_map, moge_mask, out_dir)
     np.save(out_dir / 'depth_map.npy', depth_map)
@@ -141,6 +195,68 @@ def run_estimate_depth(scene, out_dir, depthpro_model, depthpro_transform):
     }
     with open(out_dir / 'cam_params.json', 'w') as fp:
         json.dump(cam_params, fp)
+
+
+def run_fuse_depth(
+    scene,
+    out_dir,
+    points_world,
+    calib,
+    depthpro_model,
+    depthpro_transform,
+    depth_fill="none",
+    fuse_align=True,
+    colors=None,
+):
+    """Fuse LiDAR point-cloud depth with dense vision depth."""
+    lidar = compute_lidar_depth(
+        scene.image_np,
+        points_world,
+        calib,
+        colors=colors,
+        depth_fill=depth_fill,
+    )
+    f_px = float(lidar["K"][0, 0])
+    estimate_depth, _ = run_estimate_depth_maps(
+        scene, out_dir, depthpro_model, depthpro_transform, f_px=f_px
+    )
+    fused, fused_valid = fuse_lidar_with_estimate(
+        lidar["depth_map"],
+        lidar["valid_mask"],
+        estimate_depth,
+        align=fuse_align,
+        align_fn=align_depth,
+    )
+    write_depth_artifacts(
+        out_dir,
+        fused,
+        fused_valid,
+        lidar["K"],
+        lidar["c2w"],
+        lidar["points_cam"],
+        lidar["colors"],
+    )
+
+
+def run_fuse_py123d_depth(sample, out_dir, depthpro_model, depthpro_transform, depth_fill="none", fuse_align=True):
+    """Fuse py123d LiDAR with vision depth and write nuScenes annotations."""
+    scene = _NumpyImageScene(sample["image_np"])
+    run_fuse_depth(
+        scene,
+        out_dir,
+        sample["points_world"],
+        sample["calib"],
+        depthpro_model,
+        depthpro_transform,
+        depth_fill=depth_fill,
+        fuse_align=fuse_align,
+    )
+    ann_path = Path(out_dir) / "nuscenes_annotations.json"
+    with open(ann_path, "w") as f:
+        json.dump(sample["annotations"], f)
+    gt_path = Path(out_dir) / "nuscenes_gt_3dbbox.json"
+    with open(gt_path, "w") as f:
+        json.dump(sample.get("gt_3dbbox", []), f)
 
 
 class _NumpyImageScene:
@@ -188,9 +304,9 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", help="save directory", default="../experimental_results/COCO/", type=str)
     parser.add_argument(
         "--depth_source",
-        choices=["estimate", "lidar", "py123d"],
+        choices=["estimate", "lidar", "py123d", "fuse"],
         default=None,
-        help="depth backend: estimate, lidar (manifest), or py123d (Arrow logs)",
+        help="depth backend: estimate, lidar, py123d, or fuse (LiDAR + vision)",
     )
     parser.add_argument(
         "--manifest",
@@ -216,9 +332,15 @@ if __name__ == "__main__":
 
     depth_source = args.depth_source or opt.run.depth.get("source", "estimate")
     depth_fill = args.depth_fill or opt.run.depth.get("fill", "none")
+    fuse_align = bool(opt.run.depth.get("fuse_align", True))
     end_index = None if args.end_index < 0 else args.end_index
+    has_py123d = bool(
+        args.py123d_data_root
+        or os.environ.get("PY123D_DATA_ROOT")
+        or opt.run.get("py123d")
+    )
 
-    if depth_source == "py123d":
+    if depth_source == "py123d" or (depth_source == "fuse" and has_py123d):
         from integrations.py123d.nuscenes_adapter import Py123dNuScenesLoader
 
         py_cfg = opt.run.get("py123d", {})
@@ -234,7 +356,21 @@ if __name__ == "__main__":
         split = args.split if args.split not in ("val",) else loader.split
         indices = range(args.start_index, end_index if end_index is not None else len(loader))
 
-        for i in tqdm(indices, desc="py123d depth"):
+        depthpro_model = depthpro_transform = None
+        if depth_source == "fuse":
+            sys.path = ['./', '../external/MoGe'] + sys.path
+            import depth_pro
+
+            assert torch.cuda.is_available()
+            device = f"cuda:{args.gpu_idx}"
+            print("Loading DepthPro for fuse mode...")
+            depthpro_model, depthpro_transform = depth_pro.create_model_and_transforms(
+                device=device, precision=torch.float16
+            )
+            depthpro_model.eval()
+
+        desc = "fuse depth (py123d+vision)" if depth_source == "fuse" else "py123d depth"
+        for i in tqdm(indices, desc=desc):
             sample = loader.extract_sample(i)
             output_dir = os.path.join(args.save_dir, split, loader.output_dir_name(sample))
             scene = _NumpyImageScene(sample["image_np"])
@@ -248,16 +384,43 @@ if __name__ == "__main__":
                     with open(out_dir / "nuscenes_gt_3dbbox.json", "w") as f:
                         json.dump(sample.get("gt_3dbbox", []), f)
                 continue
-            run_py123d_depth(sample, out_dir, depth_fill=depth_fill)
+            if depth_source == "fuse":
+                run_fuse_py123d_depth(
+                    sample,
+                    out_dir,
+                    depthpro_model,
+                    depthpro_transform,
+                    depth_fill=depth_fill,
+                    fuse_align=fuse_align,
+                )
+            else:
+                run_py123d_depth(sample, out_dir, depth_fill=depth_fill)
 
-    elif depth_source == "lidar":
+    elif depth_source in ("lidar", "fuse"):
         if not args.manifest:
-            raise ValueError("--manifest is required when --depth_source=lidar")
+            raise ValueError(
+                "--manifest is required for depth_source=lidar/fuse "
+                "(or use fuse with py123d config + PY123D_DATA_ROOT)"
+            )
         loader = LidarManifestLoader(args.manifest)
         split = get_lidar_save_split(loader, args.split)
         indices = range(args.start_index, end_index if end_index is not None else len(loader))
 
-        for i in tqdm(indices, desc="LiDAR depth"):
+        depthpro_model = depthpro_transform = None
+        if depth_source == "fuse":
+            sys.path = ['./', '../external/MoGe'] + sys.path
+            import depth_pro
+
+            assert torch.cuda.is_available()
+            device = f"cuda:{args.gpu_idx}"
+            print("Loading DepthPro for fuse mode...")
+            depthpro_model, depthpro_transform = depth_pro.create_model_and_transforms(
+                device=device, precision=torch.float16
+            )
+            depthpro_model.eval()
+
+        desc = "fuse depth (LiDAR+vision)" if depth_source == "fuse" else "LiDAR depth"
+        for i in tqdm(indices, desc=desc):
             scene_entry = loader.get_scene_by_index(i)
             output_dir = os.path.join(
                 args.save_dir, split, loader.output_dir_name(scene_entry)
@@ -275,10 +438,25 @@ if __name__ == "__main__":
             if depth_already_done(out_dir):
                 continue
 
-            run_lidar_depth(scene, out_dir, depth_fill=depth_fill)
+            if depth_source == "fuse":
+                points, colors = load_pointcloud(scene.pointcloud_path)
+                calib = load_calib(scene.calib_path)
+                run_fuse_depth(
+                    scene,
+                    out_dir,
+                    points,
+                    calib,
+                    depthpro_model,
+                    depthpro_transform,
+                    depth_fill=depth_fill,
+                    fuse_align=fuse_align,
+                    colors=colors,
+                )
+            else:
+                run_lidar_depth(scene, out_dir, depth_fill=depth_fill)
             copy_optional_annotations(scene_entry, out_dir)
 
-    else:
+    elif depth_source == "estimate":
         sys.path = ['./', '../external/MoGe'] + sys.path
         import depth_pro
 

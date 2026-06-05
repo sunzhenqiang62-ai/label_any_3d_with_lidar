@@ -1,0 +1,46 @@
+# nuScenes: LiDAR depth prior + DepthPro fill in holes (fuse mode)
+scene:
+  type: 'InTheWild'
+  attributes:
+    img_path: ''
+  annotations_path: ''
+  save_dir: '../experimental_results/nuScenes/'
+  K: []
+run:
+  data_backend: 'py123d'
+  use_enhancement: True
+  only_foreground: False
+  detection_source: 'model'
+  single_object: False
+  reproject: False
+  depth_edge_threshold: 0.0001
+  amodal_completion: null
+  obj_rec: 'trellis'
+  depth:
+    source: 'fuse'
+    fill: 'none'        # do not pre-fill LiDAR; vision fills holes after fusion
+    fuse_align: true    # RANSAC align vision to LiDAR in overlap
+  py123d:
+    dataset: 'nuscenes'
+    split_type: 'val'
+    camera_key: 'CAM_FRONT'
+    lidar_key: 'merged'
+    frame_index: null
+    max_scenes: 5
+  segmentation:
+    holistic: 'locateanything'
+    crop_refinement: 'oneformer'
+    crop_refinement_pad: 0.15
+    crop_refinement_min_area: 400
+    fg_bg: 'gt'
+    tagger: 'null'
+    allowed_categories: ['car', 'person']
+    locateanything:
+      model_path: 'nvidia/LocateAnything-3B'
+      generation_mode: 'hybrid'
+      categories: ['person', 'car']
+      min_mask_area: 1600
+  calibration:
+    intrinsics: 'gt'
+    pose: 'gt'
+  clip_bg: False

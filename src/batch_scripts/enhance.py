@@ -10,8 +10,15 @@ sys.path = [
 ] + sys.path
 from dataset_model import get_scene
 from pathlib import Path
-from inference_invsr_us import get_parser, get_configs, InvSamplerSR
 from batch_scripts.pipeline_loader import setup_pipeline_loop
+
+
+def _get_invsr_sampler():
+    from inference_invsr_us import get_parser, get_configs, InvSamplerSR
+
+    invsr_args = get_parser(description="My CLI tool")
+    invsr_configs = get_configs(invsr_args)
+    return InvSamplerSR(invsr_configs), invsr_args
 
 
 if __name__ == "__main__":
@@ -39,9 +46,8 @@ if __name__ == "__main__":
 
     assert torch.cuda.is_available()
 
-    invsr_args = get_parser(description="My CLI tool")
-    invsr_configs = get_configs(invsr_args)
-    sampler = InvSamplerSR(invsr_configs)
+    sampler = None
+    invsr_args = None
 
     for i in tqdm(indices):
         scene_entry = loader.get_scene_by_index(i)
@@ -63,4 +69,6 @@ if __name__ == "__main__":
         enhance_path = out_dir / "enhanced" / "input.png"
         if enhance_path.exists():
             continue
+        if sampler is None:
+            sampler, invsr_args = _get_invsr_sampler()
         sampler.inference(f"{out_dir}/input.png", out_path=out_dir / "enhanced", bs=invsr_args.bs)

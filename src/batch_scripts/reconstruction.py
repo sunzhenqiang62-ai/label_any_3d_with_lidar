@@ -71,9 +71,15 @@ if __name__ == "__main__":
         (out_dir / "reconstruction").mkdir(exist_ok=True)
 
         crop_root = out_dir / "crops"
-        crop_paths = list(crop_root.glob("*_reproj.png"))
-        for crop_path in reversed(crop_paths):
+        crop_paths = sorted(crop_root.glob("*_reproj.png"), reverse=True)
+        max_recon = int(os.environ.get("SMOKE_MAX_RECON_OBJECTS", "0"))
+        recon_count = 0
+        for crop_path in crop_paths:
             obj_id = crop_path.stem.replace("_reproj", "")
             object_space_path = out_dir / "object_space" / f"{obj_id}.glb"
             if not object_space_path.exists():
                 reconstruct_object(opt.run, out_dir, obj_id)
+                recon_count += 1
+                if max_recon > 0 and recon_count >= max_recon:
+                    print(f"SMOKE_MAX_RECON_OBJECTS={max_recon} reached; skipping remaining.")
+                    break

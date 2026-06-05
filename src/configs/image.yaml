@@ -16,13 +16,23 @@ run:
   depth:
     metric: 'unidepth'   # options: 'gt', 'gt_ss', 'depthanything', 'metric3d', 'unidepth'
     relative: null # options: 'marigold', 'metric3d', 'moge', null
+  detection_source: 'gt'  # gt: dataset masks/boxes; model: segmentation.holistic detector
   segmentation:
-    holistic: 'entityv2'
+    holistic: 'entityv2'  # entityv2 | oneformer | locateanything
+    crop_refinement: null  # with holistic locateanything: oneformer = seg inside LA box crops
+    crop_refinement_pad: 0.15
+    crop_refinement_min_area: 400
     fg_bg: 'clipseg' # options: 'gt', 'oneformer', 'clipseg', 'largest'
+    allowed_categories: null  # e.g. ['car', 'person'] to filter model detections
+    locateanything:
+      model_path: 'nvidia/LocateAnything-3B'
+      generation_mode: 'hybrid'  # fast | slow | hybrid
+      categories: null  # null -> default driving-scene set
+      min_mask_area: 1600
     merge_masks: # merge small masks with larger neighboring masks 
       dilation: 7
       threshold: 0.5
-    tagger: 'ovsam' # options: 'ovsam', null
+    tagger: 'ovsam' # options: 'ovsam', 'oneformer', null
   calibration:
     intrinsics: 'perspectivefields'  # options: 'gt', 'perspectivefields'
     pose: null  # options: 'gt', null

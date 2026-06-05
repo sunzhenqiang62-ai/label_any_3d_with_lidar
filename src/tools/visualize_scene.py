@@ -240,6 +240,25 @@ def render_pointcloud_projection(
 
 
 BEV_CANVAS_SIZE = 1920
+DEFAULT_COMPOSE_MODES = [
+    "gt_2d",
+    "depth",
+    "crops",
+    "bbox_3d",
+    "mesh_overlay",
+    "pc_proj",
+    "bev_3d",
+]
+COMPOSE_PANEL_FILES = {
+    "gt_2d": ["gt_overlay.png"],
+    "depth": ["rgb_depth.png", "depth_colormap.png"],
+    "crops": ["crops_grid.png"],
+    "bbox_3d": ["bbox3d_overlay.png"],
+    "mesh_overlay": ["mesh_overlay.png"],
+    "mesh": ["mesh_overlay.png"],
+    "pc_proj": ["pointcloud_projection.png"],
+    "bev_3d": ["bev_3d.png"],
+}
 BEV_PRED_COLOR = (220, 80, 30)
 BEV_GT_COLORS = {
     "car": (0, 180, 0),
@@ -334,6 +353,121 @@ def _collect_valid_xz(boxes: List[dict]) -> List[np.ndarray]:
 
 def _bev_gt_color(category_name: str) -> tuple[int, int, int]:
     return BEV_GT_COLORS.get((category_name or "object").lower(), BEV_GT_COLORS["default"])
+
+
+def _nice_distance_step(span: float, target_ticks: int = 8) -> float:
+    if span <= 0:
+        return 1.0
+    raw = span / max(target_ticks, 1)
+    magnitude = 10 ** math.floor(math.log10(max(raw, 1e-6)))
+    for mult in (1.0, 2.0, 5.0, 10.0):
+        step = mult * magnitude
+        if span / step <= target_ticks * 1.2:
+            return float(step)
+    return float(10.0 * magnitude)
+
+
+def _format_distance_m(value: float) -> str:
+    if abs(value) < 1e-6:
+        return "0m"
+    if abs(value - round(value)) < 1e-3:
+        return f"{int(round(value))}m"
+    return f"{value:.1f}m"
+
+
+def _put_text_with_bg(
+    img: np.ndarray,
+    text: str,
+    org: tuple[int, int],
+    font_scale: float,
+    color: tuple[int, int, int],
+    thickness: int,
+    *,
+    bg: tuple[int, int, int] = (245, 245, 245),
+) -> None:
+    (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+    x, y = org
+    cv2.rectangle(img, (x - 2, y - th - 2), (x + tw + 2, y + baseline + 2), bg, -1)
+    cv2.putText(
+        img, text, org, cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA
+    )
+
+
+def _draw_bev_distance_axes(
+    bev: np.ndarray,
+    xmin: float,
+    xmax: float,
+    zmin: float,
+    zmax: float,
+    to_px,
+    *,
+    scale: float,
+) -> None:
+    """Draw meter grid lines and distance tick labels on the BEV canvas."""
+    canvas = bev.shape[0]
+    tick_font = 0.30 * scale
+    tick_th = max(1, int(scale))
+    axis_color = (55, 55, 55)
+    major_grid = (205, 205, 205)
+    margin = max(6, int(8 * scale))
+
+    x_step = _nice_distance_step(xmax - xmin)
+    z_step = _nice_distance_step(zmax - zmin)
+
+    x_val = math.ceil(xmin / x_step) * x_step
+    while x_val <= xmax + 1e-6:
+        px, _ = to_px(float(x_val), zmin)
+        cv2.line(bev, (px, 0), (px, canvas - 1), major_grid, 1, cv2.LINE_AA)
+        label = _format_distance_m(x_val)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, tick_font, tick_th)
+        tx = int(np.clip(px - tw // 2, margin, canvas - tw - margin))
+        _put_text_with_bg(
+            bev, label, (tx, canvas - margin), tick_font, axis_color, tick_th
+        )
+        x_val += x_step
+
+    z_val = math.ceil(zmin / z_step) * z_step
+    while z_val <= zmax + 1e-6:
+        _, py = to_px(xmin, float(z_val))
+        cv2.line(bev, (0, py), (canvas - 1, py), major_grid, 1, cv2.LINE_AA)
+        label = _format_distance_m(z_val)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, tick_font, tick_th)
+        ty = int(np.clip(py + th // 2, margin + th, canvas - margin - int(24 * scale)))
+        _put_text_with_bg(
+            bev, label, (margin, ty), tick_font, axis_color, tick_th
+        )
+        z_val += z_step
+
+    if xmin <= 0.0 <= xmax and zmin <= 0.0 <= zmax:
+        ox, oy = to_px(0.0, 0.0)
+        marker_len = max(8, int(12 * scale))
+        cv2.line(bev, (ox - marker_len, oy), (ox + marker_len, oy), (70, 70, 70), 2, cv2.LINE_AA)
+        cv2.line(bev, (ox, oy - marker_len), (ox, oy + marker_len), (70, 70, 70), 2, cv2.LINE_AA)
+        _put_text_with_bg(
+            bev,
+            "cam",
+            (ox + int(6 * scale), oy - int(6 * scale)),
+            tick_font * 0.95,
+            (70, 70, 70),
+            tick_th,
+        )
+
+    _put_text_with_bg(
+        bev,
+        "X (m)",
+        (canvas - margin - int(42 * scale), canvas - margin - int(18 * scale)),
+        tick_font * 1.05,
+        axis_color,
+        tick_th,
+    )
+    _put_text_with_bg(
+        bev,
+        "Z (m)",
+        (margin, margin + int(14 * scale)),
+        tick_font * 1.05,
+        axis_color,
+        tick_th,
+    )
 
 
 def _bev_footprint_polygon(verts: np.ndarray, to_px) -> Optional[np.ndarray]:
@@ -466,8 +600,8 @@ def render_bev_3d(scene_dir: Path, out_dir: Path, canvas: int = BEV_CANVAS_SIZE)
     bev = np.full((canvas, canvas, 3), 245, dtype=np.uint8)
     for t in np.linspace(0, 1, grid_n):
         x = int(t * (canvas - 1))
-        cv2.line(bev, (x, 0), (x, canvas - 1), (230, 230, 230), 1, cv2.LINE_AA)
-        cv2.line(bev, (0, x), (canvas - 1, x), (230, 230, 230), 1, cv2.LINE_AA)
+        cv2.line(bev, (x, 0), (x, canvas - 1), (235, 235, 235), 1, cv2.LINE_AA)
+        cv2.line(bev, (0, x), (canvas - 1, x), (235, 235, 235), 1, cv2.LINE_AA)
 
     def to_px(x: float, z: float) -> tuple[int, int]:
         u = (x - xmin) / (xmax - xmin + 1e-8)
@@ -475,6 +609,8 @@ def render_bev_3d(scene_dir: Path, out_dir: Path, canvas: int = BEV_CANVAS_SIZE)
         px = int(np.clip(u * (canvas - 1), 0, canvas - 1))
         py = int(np.clip((1.0 - v) * (canvas - 1), 0, canvas - 1))
         return px, py
+
+    _draw_bev_distance_axes(bev, xmin, xmax, zmin, zmax, to_px, scale=scale)
 
     def xz_to_px_array(xz_pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         u = (xz_pts[:, 0] - xmin) / (xmax - xmin + 1e-8)
@@ -677,35 +813,59 @@ def _compose_summary_grid(
     return np.vstack(rows)
 
 
+def _load_compose_panel(out_dir: Path, mode: str, rendered: Optional[Path]) -> Optional[np.ndarray]:
+    candidates: List[Path] = []
+    if rendered is not None:
+        candidates.append(rendered)
+    candidates.extend(out_dir / name for name in COMPOSE_PANEL_FILES.get(mode, []))
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen or not path.exists():
+            continue
+        seen.add(key)
+        im = cv2.imread(str(path))
+        if im is not None:
+            return im
+    return None
+
+
+def _render_compose_panel(scene_dir: Path, out_dir: Path, mode: str) -> Optional[Path]:
+    if mode == "gt_2d":
+        return render_gt_2d(scene_dir, out_dir)
+    if mode == "depth":
+        ps = render_depth(scene_dir, out_dir)
+        if not ps:
+            return None
+        for p in ps:
+            if p.name == "rgb_depth.png":
+                return p
+        return ps[0]
+    if mode == "crops":
+        return render_crops_grid(scene_dir, out_dir)
+    if mode == "bbox_3d":
+        return render_bbox_3d(scene_dir, out_dir)
+    if mode == "pc_proj":
+        return render_pointcloud_projection(scene_dir, out_dir)
+    if mode == "bev_3d":
+        return render_bev_3d(scene_dir, out_dir)
+    if mode in ("mesh", "mesh_overlay"):
+        return render_mesh_overlay(scene_dir, out_dir)
+    return None
+
+
 def render_compose(scene_dir: Path, out_dir: Path, modes: List[str]) -> Optional[Path]:
     panels: List[np.ndarray] = []
     bev_panel: Optional[np.ndarray] = None
     for mode in modes:
-        if mode == "gt_2d":
-            p = render_gt_2d(scene_dir, out_dir)
-        elif mode == "depth":
-            ps = render_depth(scene_dir, out_dir)
-            p = ps[0] if ps else None
-        elif mode == "crops":
-            p = render_crops_grid(scene_dir, out_dir)
-        elif mode == "bbox_3d":
-            p = render_bbox_3d(scene_dir, out_dir)
-        elif mode == "pc_proj":
-            p = render_pointcloud_projection(scene_dir, out_dir)
-        elif mode == "bev_3d":
-            p = render_bev_3d(scene_dir, out_dir)
-        elif mode in ("mesh", "mesh_overlay"):
-            p = render_mesh_overlay(scene_dir, out_dir)
+        rendered = _render_compose_panel(scene_dir, out_dir, mode)
+        im = _load_compose_panel(out_dir, mode, rendered)
+        if im is None:
+            continue
+        if mode == "bev_3d":
+            bev_panel = im
         else:
-            p = None
-        if p and p.exists():
-            im = cv2.imread(str(p))
-            if im is None:
-                continue
-            if mode == "bev_3d":
-                bev_panel = im
-            else:
-                panels.append(im)
+            panels.append(im)
     if not panels and bev_panel is None:
         return None
     summary = _compose_summary_grid(panels, bev_panel)
@@ -769,7 +929,8 @@ def visualize_scene(
 ) -> None:
     out_dir = _viz_dir(scene_dir, viz_subdir)
     if "compose" in modes:
-        sub_modes = [m for m in modes if m != "compose"] or ["gt_2d", "depth", "crops", "bbox_3d", "mesh_overlay", "pc_proj", "bev_3d"]
+        extra_modes = [m for m in modes if m not in ("compose",) and m not in DEFAULT_COMPOSE_MODES]
+        sub_modes = list(dict.fromkeys(DEFAULT_COMPOSE_MODES + extra_modes))
         render_compose(scene_dir, out_dir, sub_modes)
     else:
         for mode in modes:

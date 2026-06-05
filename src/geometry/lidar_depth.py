@@ -191,27 +191,11 @@ def _subsample_points(points, colors, max_points=500000, seed=0):
     return points, colors
 
 
-def build_scene_outputs(
-    out_dir,
-    image_np,
-    points_world,
-    calib,
-    colors=None,
-    depth_fill="none",
-    max_ply_points=500000,
-):
-    """
-    Transform LiDAR to camera frame, rasterize depth, write pipeline artifacts.
-
-    Writes: depth_map.npy, cam_params.json, depth_scene.ply, depth_scene_no_edge.ply
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(exist_ok=True, parents=True)
-
+def compute_lidar_depth(image_np, points_world, calib, colors=None, depth_fill="none"):
+    """Rasterize LiDAR to a metric depth map (no file I/O)."""
     K = calib["K"]
     world_to_cam = calib["world_to_cam"]
     c2w = calib["c2w"]
-    # Accept both legacy LabelAny3D keys (H/W) and py123d-style keys (height/width).
     H = calib.get("H", calib.get("height"))
     W = calib.get("W", calib.get("width"))
     if H is None or W is None:
@@ -230,21 +214,124 @@ def build_scene_outputs(
     elif colors.max() <= 1.0:
         colors = (colors * 255).astype(np.uint8)
 
+    return {
+        "depth_map": depth_map,
+        "valid_mask": valid_mask,
+        "K": K,
+        "c2w": c2w,
+        "H": int(H),
+        "W": int(W),
+        "points_cam": points_cam,
+        "colors": colors,
+    }
+
+
+def fuse_lidar_with_estimate(
+    lidar_depth,
+    valid_mask,
+    estimate_depth,
+    align=True,
+    align_fn=None,
+):
+    """
+    LiDAR-constrained depth: keep metric LiDAR where valid, fill holes with vision.
+
+    Args:
+        lidar_depth: (H, W) metric depth from point cloud
+        valid_mask: (H, W) bool, LiDAR-covered pixels
+        estimate_depth: (H, W) dense metric depth from MoGe+DepthPro
+        align: RANSAC-scale estimate to LiDAR in overlap before fusion
+        align_fn: optional align_depth(relative, metric, mask) callable
+    """
+    lidar = np.asarray(lidar_depth, dtype=np.float32)
+    estimate = np.asarray(estimate_depth, dtype=np.float32)
+    valid = (
+        np.asarray(valid_mask, dtype=bool)
+        & np.isfinite(lidar)
+        & (lidar < np.inf)
+        & (lidar > 1e-6)
+    )
+
+    fused = estimate.copy()
+    if align and valid.sum() > 50 and align_fn is not None:
+        estimate_finite = np.isfinite(estimate) & (estimate > 1e-6) & (estimate < np.inf)
+        fused = align_fn(
+            estimate,
+            lidar,
+            mask=valid,
+            apply_mask=estimate_finite,
+        ).astype(np.float32)
+
+    fused[valid] = lidar[valid]
+    fused_valid = valid | (
+        np.isfinite(fused) & (fused < np.inf) & (fused > 1e-6)
+    )
+    return fused, fused_valid
+
+
+def write_depth_artifacts(
+    out_dir,
+    depth_map,
+    valid_mask,
+    K,
+    c2w,
+    points_cam,
+    colors,
+    max_ply_points=500000,
+):
+    """Write depth_map.npy, cam_params.json, and scene PLY files."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(exist_ok=True, parents=True)
+
     pts_export, col_export = _subsample_points(points_cam, colors, max_points=max_ply_points)
     trimesh.PointCloud(pts_export, col_export).export(out_dir / "depth_scene.ply")
     trimesh.PointCloud(pts_export, col_export).export(out_dir / "depth_scene_no_edge.ply")
 
-    depth_save = depth_map.copy()
+    depth_save = depth_map.copy().astype(np.float32)
     depth_save[~valid_mask] = np.inf
     np.save(out_dir / "depth_map.npy", depth_save)
 
     cam_params = {
-        "K": K.tolist(),
-        "c2w": c2w.tolist(),
-        "W": int(W),
-        "H": int(H),
+        "K": np.asarray(K).tolist(),
+        "c2w": np.asarray(c2w).tolist(),
+        "W": int(valid_mask.shape[1]),
+        "H": int(valid_mask.shape[0]),
     }
     with open(out_dir / "cam_params.json", "w") as fp:
         json.dump(cam_params, fp)
 
-    return depth_map, valid_mask, K, c2w
+
+def build_scene_outputs(
+    out_dir,
+    image_np,
+    points_world,
+    calib,
+    colors=None,
+    depth_fill="none",
+    max_ply_points=500000,
+):
+    """
+    Transform LiDAR to camera frame, rasterize depth, write pipeline artifacts.
+
+    Writes: depth_map.npy, cam_params.json, depth_scene.ply, depth_scene_no_edge.ply
+    """
+    out_dir = Path(out_dir)
+    computed = compute_lidar_depth(
+        image_np, points_world, calib, colors=colors, depth_fill=depth_fill
+    )
+    write_depth_artifacts(
+        out_dir,
+        computed["depth_map"],
+        computed["valid_mask"],
+        computed["K"],
+        computed["c2w"],
+        computed["points_cam"],
+        computed["colors"],
+        max_ply_points=max_ply_points,
+    )
+    return (
+        computed["depth_map"],
+        computed["valid_mask"],
+        computed["K"],
+        computed["c2w"],
+    )

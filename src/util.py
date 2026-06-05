@@ -36,7 +36,14 @@ def initialize_acompletion(device):
 
 
 def initialize_zero123(device):
-    from zero123 import Zero123Pipeline
+    try:
+        from zero123 import Zero123Pipeline
+    except ModuleNotFoundError:
+        print(
+            "zero123 not installed (external/One-2-3-45); "
+            "elevation will use default 0 for smoke runs."
+        )
+        return None
     pipe = Zero123Pipeline.from_pretrained(
         "ashawkey/zero123-xl-diffusers",
         torch_dtype=torch.float16,
@@ -76,8 +83,11 @@ def depth_to_points(depth, K=None, R=None, t=None):
 
 
 def estimate_elevation(img, cache_dir, zero123, dtype=torch.float16):
-    from elevation_estimate.utils.elev_est_api import elev_est_api
     cache_dir.mkdir(exist_ok=True)
+    if zero123 is None:
+        np.save(cache_dir / "estimated_elevation.npy", np.array(0.0))
+        return
+    from elevation_estimate.utils.elev_est_api import elev_est_api
     img = img.astype(np.float32) / 255.0
     img = img[..., :3] * img[..., -1:] + (1 - img[..., -1:])
     img = Image.fromarray(np.uint8((img * 255).clip(0, 255)))

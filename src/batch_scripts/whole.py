@@ -7,7 +7,11 @@ from tqdm import tqdm
 import torch
 import trimesh
 import cv2
-sys.path = ["./"] + sys.path
+sys.path = [
+    "./",
+    "../external/mast3r",
+    "../external/mast3r/dust3r",
+] + sys.path
 from dataset_model import get_scene
 from pathlib import Path
 import numpy as np
@@ -123,13 +127,16 @@ if __name__ == "__main__":
             )
         if len(scene_mesh.geometry) > 0:
             scene_mesh.export(out_dir / "reconstruction" / "full_scene.glb")
-
             print("Going to save ground aligned bbox")
             bbox_list = save_3d_with_ground_alignment_bbox(out_dir)
-            if len(bbox_list) == 0:
-                print("Mesh-based bbox is empty; using depth fallback bbox.")
-                bbox_list = save_3d_bbox_from_depth_fallback(out_dir)
-            draw_cube(out_dir, is_ground=True)
+        else:
+            print("No reconstructed meshes; using depth fallback for 3D boxes.")
+            bbox_list = []
 
-            if os.path.exists(out_dir / "3dbbox_ground.json"):
-                os.rename(out_dir / "3dbbox_ground.json", out_dir / "3dbbox.json")
+        if len(bbox_list) == 0:
+            print("Mesh-based bbox is empty; using depth fallback bbox.")
+            bbox_list = save_3d_bbox_from_depth_fallback(out_dir)
+        draw_cube(out_dir, is_ground=True)
+
+        if os.path.exists(out_dir / "3dbbox_ground.json"):
+            os.rename(out_dir / "3dbbox_ground.json", out_dir / "3dbbox.json")

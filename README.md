@@ -7,15 +7,18 @@ Based on [UVA LabelAny3D](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D)
 
 | Change | What it does |
 |--------|----------------|
-| **Three depth backends** | `depth.py --depth_source estimate \| lidar \| py123d` — same outputs for downstream steps |
+| **Four depth backends** | `estimate` \| `lidar` \| `py123d` \| **`fuse`** (LiDAR metric + MoGe/DepthPro hole fill) — same downstream layout |
+| **Fuse depth** | Keep projected LiDAR where valid; fill holes with aligned vision depth (`fuse_align: true`) |
 | **Custom LiDAR** | Manifest + calib JSON → `depth_map.npy`, PLY, `cam_params.json` ([guide](docs/LIDAR_INPUT.md)) |
 | **py123d + nuScenes** | Arrow logs → depth + projected 3D-box masks (`nuscenes_annotations.json`) for crops ([guide](docs/PY123D_NUSCENES.md)) |
+| **LocateAnything detector** | VLM 2D detection via `segmentation.holistic: locateanything` + `run_locateanything` wrapper |
+| **Crop refinement** | OneFormer semantic masks **inside** LocateAnything 2D box crops (`crop_refinement: oneformer`) |
 | **Skip finished scenes** | Resume when `depth_map.npy` + `cam_params.json` already exist |
 | **Sparse LiDAR** | `--depth_fill nearest` fills empty depth pixels before alignment |
-| **CPU smoke tests** | `test_lidar_depth_smoke.py`, `test_py123d_coord.py`, `test_py123d_annotations.py` |
-| **Scene visualization** | `visualize_scene.py`: 3×N summary grid, high-res BEV with GT (color) + Pred (blue) |
+| **CPU smoke tests** | `test_lidar_depth_smoke.py` (incl. fuse align), `test_py123d_coord.py`, `test_py123d_annotations.py` |
+| **Scene visualization** | `visualize_scene.py`: 3×N summary + full-width BEV; **meter grid** on X/Z axes; `compose` always stitches all panels |
 | **GT 3D boxes (py123d)** | `nuscenes_gt_3dbbox.json` per scene; BEV GT footprints without text labels |
-| **Model-based crops** | OneFormer segmentation/tagging; `allowed_categories: ['car', 'person']` in configs |
+| **Model-based crops** | `detection_source: model` with **EntityV2**, **OneFormer**, or **[LocateAnything](https://research.nvidia.com/labs/lpr/locate-anything/)**; category filter via `allowed_categories` |
 
 ### New / modified files (fork)
 
@@ -27,6 +30,10 @@ src/integrations/py123d/              # nuScenes adapter (coord, annotations, lo
 src/configs/lidar.yaml
 src/configs/py123d_nuscenes.yaml
 src/configs/py123d_nuscenes_smoke.yaml
+src/configs/py123d_nuscenes_fuse.yaml
+src/configs/py123d_nuscenes_locateanything.yaml
+src/integrations/locateanything/       # parser, worker, detect
+requirements-locateanything.txt
 src/batch_scripts/pipeline_loader.py
 src/batch_scripts/run_nuscenes.py
 src/tools/visualize_scene.py
@@ -47,6 +54,9 @@ Modified: `src/batch_scripts/depth.py`, `src/batch_scripts/get_crops_enhanced.py
 | `estimate` | Original COCO / in-the-wild (MoGe + DepthPro) | `python batch_scripts/depth.py --split val` |
 | `lidar` | You have RGB + world-frame point cloud + calibration | `--depth_source lidar --manifest .../manifest.json` |
 | `py123d` | nuScenes (or other sets) already converted with [py123d](https://github.com/kesai-labs/py123d) | `--depth_source py123d --config configs/py123d_nuscenes.yaml` |
+| `fuse` | nuScenes / LiDAR scenes: metric LiDAR + dense vision fill | `run.depth.source: fuse` in config, or `--depth_source fuse` |
+
+**Fuse logic** (`src/geometry/lidar_depth.py`): rasterize LiDAR → optional hole fill → MoGe+DepthPro dense estimate → RANSAC scale on overlap → overwrite LiDAR pixels with metric values, fill remaining holes with aligned vision depth.
 
 All modes write the **same scene layout** (`input.png`, `depth_map.npy`, `cam_params.json`, …) so `enhance.py` → `whole.py` stay compatible.
 
@@ -77,13 +87,37 @@ cd src
 python batch_scripts/run_nuscenes.py --preset smoke --skip_existing --visualize after_depth
 ```
 
-**3. Visualization**
+**3. LocateAnything + fuse depth (smoke)**
+
+```bash
+pip install -r requirements-py123d.txt
+pip install -r requirements-locateanything.txt   # optional VLM deps
+source env.sh
+export PY123D_DATA_ROOT=/path/to/py123d_data
+export HF_ENDPOINT=https://hf-mirror.com          # optional mirror
+export LOCATEANYTHING_ATTN=sdpa                   # or flash on supported GPUs
+export SMOKE_MAX_RECON_OBJECTS=8                  # optional recon cap for smoke
+
+cd src
+python batch_scripts/run_nuscenes.py \
+  --preset locateanything \
+  --save_dir ../experimental_results/nuScenes_smoke_locateanything \
+  --py123d_dataset nuscenes-mini \
+  --visualize all
+```
+
+Preset `locateanything` → `configs/py123d_nuscenes_locateanything.yaml`:
+- `depth.source: fuse` — LiDAR prior + MoGe/DepthPro fill
+- `segmentation.holistic: locateanything` — VLM 2D boxes
+- `segmentation.crop_refinement: oneformer` — semantic mask per crop (not full image)
+
+**4. Visualization**
 
 ```bash
 python tools/visualize_scene.py --root ../experimental_results/nuScenes/nuscenes_val --mode compose
 ```
 
-`compose` builds `viz/summary.png`: **3 panels per row**, full-width **BEV** on the last row (GT by color, Pred in blue).
+`compose` builds `viz/summary.png`: **3 panels per row** (GT 2D, depth, crops, 3D boxes, mesh, point cloud), full-width **BEV** on the last row with **meter tick labels** on X/Z axes (GT by color, Pred in blue). `compose` always includes all default panels even when only `bev_3d` is requested alongside it.
 
 Pipeline order: `depth` → `enhance` → `crops` → `completion` → `elevation` → `reconstruction` → `whole`. All nuScenes steps use `--data_backend py123d`.
 
@@ -95,9 +129,20 @@ One-scene `nuscenes-mini` smoke run with **py123d LiDAR depth**, **OneFormer** (
 
 ![nuScenes OneFormer smoke summary](docs/assets/nuscenes_oneformer_smoke_summary.png)
 
-Layout: row 1 — GT 2D, depth, crops; row 2 — 3D boxes, mesh projection, LiDAR projection; row 3 — full-width BEV (colored GT, blue Pred).
+Layout: row 1 — GT 2D, depth, crops; row 2 — 3D boxes, mesh projection, LiDAR projection; row 3 — full-width BEV with distance grid (colored GT, blue Pred).
 
 Older examples: [summary](docs/assets/nuscenes_smoke_summary.png) · [mesh](docs/assets/nuscenes_mesh_overlay.png) · [BEV](docs/assets/nuscenes_bev_3d.png)
+
+### Recent updates (2026-06)
+
+| Area | Summary |
+|------|---------|
+| **Fuse depth** | `depth_source: fuse` for py123d/manifest; `fuse_lidar_with_estimate()` + RANSAC `apply_mask` fix (scale applied to all estimate pixels, not only LiDAR hits) |
+| **LocateAnything** | `src/integrations/locateanything/` — parser, worker, `detect_boxes()`; wired in `get_crops_enhanced.py` and `model_wrappers.py` |
+| **Crop workflow** | LA holistic detect → padded crop → OneFormer refine → paste mask; box-mask fallback when refine is empty |
+| **run_nuscenes** | `--preset locateanything`; depth `source`/`fill` read from config (not hardcoded `py123d`) |
+| **Visualization** | BEV meter grid (`X (m)` / `Z (m)`), camera origin marker; `DEFAULT_COMPOSE_MODES` for stable `summary.png` layout |
+| **Robustness** | DepthPro `f_px` tensor fix; `whole.py` depth fallback when meshes lack textures; `SMOKE_MAX_RECON_OBJECTS` env cap |
 
 ---
 

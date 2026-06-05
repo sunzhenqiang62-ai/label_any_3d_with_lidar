@@ -33,6 +33,12 @@ export CXX="${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-g++"
 # Optional: HuggingFace mirror for restricted networks
 # export HF_ENDPOINT=https://hf-mirror.com
 
+# LocateAnything: sdpa works on A100/L40; default config uses magi/flash which may fail
+export LOCATEANYTHING_ATTN="${LOCATEANYTHING_ATTN:-sdpa}"
+export LOCATEANYTHING_MAX_EDGE="${LOCATEANYTHING_MAX_EDGE:-1920}"
+
 echo "LabelAny3D env ready: la3d (Python $(python --version 2>&1 | awk '{print $2}'))"
 echo "  LA3D_ROOT=${LA3D_ROOT}"
-echo "  CUDA_HOME=${CUDA_HOME} ($(nvcc --version 2>/dev/null | grep release | awk '{print $6}' | tr -d ','))"
+_nvcc_ver="$(nvcc --version 2>/dev/null | grep release | awk '{print $6}' | tr -d ',')"
+echo "  CUDA_HOME=${CUDA_HOME} (${_nvcc_ver})"
+unset _nvcc_ver

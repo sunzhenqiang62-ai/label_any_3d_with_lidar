@@ -6,7 +6,7 @@ Models included:
 - Depth: MoGe, DepthPro
 - Matching: MASt3R
 - Enhancement: InvSR
-- Segmentation (in-the-wild): EntityV2, CLIPSeg, OneFormer
+- Segmentation (in-the-wild): EntityV2, CLIPSeg, OneFormer, LocateAnything
 - Tagging (in-the-wild): OVSAM
 - Completion: Amodal completion
 """
@@ -39,6 +39,12 @@ def filter_component_masks(masks, foreground_mask, threshold=0.5):
 
 def initialize_oneformer(device):
     """Initialize OneFormer model for semantic segmentation."""
+    oneformer_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), '../external/OneFormer-Colab')
+    )
+    if oneformer_root not in sys.path:
+        sys.path.insert(0, oneformer_root)
+    sys.modules.pop('oneformer', None)
     from oneformer import (
         add_oneformer_config,
         add_common_config,
@@ -75,6 +81,9 @@ def initialize_oneformer(device):
         cfg.merge_from_file(cfg_path)
         cfg.MODEL.DEVICE = device
         cfg.MODEL.WEIGHTS = model_path
+        # DiNAT + NATTEN need a larger test short edge than the default 640.
+        cfg.INPUT.MIN_SIZE_TEST = max(int(cfg.INPUT.MIN_SIZE_TEST), 1024)
+        cfg.INPUT.MAX_SIZE_TEST = max(int(cfg.INPUT.MAX_SIZE_TEST), 4096)
         cfg.freeze()
         return cfg
 
@@ -172,15 +181,27 @@ def infer_with_trellis(out_dir, obj_id):
         image = Image.open(img_path)
 
         outputs = pipeline.run(image, seed=1)
+        out_glb = Path(out_dir) / "object_space" / f"{obj_id}.glb"
 
-        glb = postprocessing_utils.to_glb(
-            outputs['gaussian'][0],
-            outputs['mesh'][0],
-            texture_size=1024,
-        )
-        glb.export(f"{out_dir}/object_space/{obj_id}.glb")
+        try:
+            glb = postprocessing_utils.to_glb(
+                outputs['gaussian'][0],
+                outputs['mesh'][0],
+                texture_size=1024,
+            )
+            glb.export(str(out_glb))
+        except Exception as post_err:
+            import trimesh
+            import numpy as np
 
-        print(f"TRELLIS inference complete: {out_dir}/object_space/{obj_id}.glb")
+            print(f"TRELLIS to_glb failed ({post_err}); exporting untextured mesh.")
+            mesh_result = outputs['mesh'][0]
+            verts = mesh_result.vertices.detach().cpu().numpy()
+            faces = mesh_result.faces.detach().cpu().numpy()
+            verts = verts @ np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
+            trimesh.Trimesh(verts, faces).export(str(out_glb))
+
+        print(f"TRELLIS inference complete: {out_glb}")
         return outputs['mesh'][0]
 
     except Exception as e:
@@ -357,10 +378,17 @@ def infer_with_depthpro(image_pil, focal_length, device='cuda:0'):
     Returns:
         Depth map as numpy array
     """
+    import torch
+
     models = load_depthpro(device)
 
     img = models['transform'](image_pil)
-    prediction = models['model'].infer(img, f_px=focal_length)
+    f_px_tensor = (
+        torch.tensor([float(focal_length)], dtype=torch.float32, device=img.device)
+        if focal_length is not None
+        else None
+    )
+    prediction = models['model'].infer(img, f_px=f_px_tensor)
     depth = prediction["depth"]
 
     return depth.cpu().numpy()
@@ -608,6 +636,51 @@ def run_oneformer(image, masks, device):
     is_thing = Image.fromarray(np.isin(predictions, thing_classes_ids))
     is_thing = np.array(is_thing.resize((W, H), Image.NEAREST))
     return filter_component_masks(masks, is_thing)
+
+
+# =============================================================================
+# LocateAnything - VLM open-vocabulary detection (NVlabs/Eagle)
+# =============================================================================
+def run_locateanything(
+    image,
+    categories=None,
+    device="cuda",
+    model_path=None,
+    generation_mode="hybrid",
+    allowed_categories=None,
+    min_mask_area=1600,
+):
+    """
+    Run NVIDIA LocateAnything for open-vocabulary 2D detection.
+
+    Args:
+        image: PIL RGB image
+        categories: List of category names to detect (e.g. ["person", "car"])
+        device: torch device string
+        model_path: HF model id or local path (default nvidia/LocateAnything-3B)
+        generation_mode: fast | slow | hybrid
+        allowed_categories: Optional filter on normalized label names
+        min_mask_area: Minimum mask pixel area
+
+    Returns:
+        Tuple of (masks ndarray NxHxW bool, labels list[str], boxes_xyxy list)
+    """
+    from PIL import Image
+
+    from integrations.locateanything.detect import detect_instances
+
+    if not isinstance(image, Image.Image):
+        raise TypeError("run_locateanything expects a PIL Image")
+
+    return detect_instances(
+        image,
+        categories=categories,
+        device=device,
+        model_path=model_path,
+        generation_mode=generation_mode,
+        allowed_categories=allowed_categories,
+        min_mask_area=min_mask_area,
+    )
 
 
 # =============================================================================

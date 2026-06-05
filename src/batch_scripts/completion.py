@@ -42,7 +42,10 @@ if __name__ == "__main__":
     assert torch.cuda.is_available()
     device = f"cuda:{args.gpu_idx}"
 
-    acompletion_p = initialize_acompletion(device)
+    amodal_mode = opt.run.get("amodal_completion", "our")
+    if amodal_mode in (None, "null", "none", ""):
+        amodal_mode = None
+    acompletion_p = initialize_acompletion(device) if amodal_mode == "our" else None
 
     for i in tqdm(indices):
         scene_entry = loader.get_scene_by_index(i)

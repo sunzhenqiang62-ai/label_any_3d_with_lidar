@@ -1,0 +1,12 @@
+# Optional: NVIDIA LocateAnything (https://research.nvidia.com/labs/lpr/locate-anything/)
+# Install from repo root: pip install -r requirements-locateanything.txt
+# Or clone Eagle: git clone https://github.com/NVlabs/Eagle.git external/Eagle && pip install -e external/Eagle/Embodied
+
+transformers>=4.57.1,<4.58
+tokenizers>=0.22.0
+accelerate>=1.5.2
+timm>=1.0.11
+peft>=0.12.0
+lmdb
+decord
+opencv-python-headless

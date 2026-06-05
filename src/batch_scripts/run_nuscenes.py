@@ -167,10 +167,18 @@ def build_step_cmd(
     ]
 
     if step == "depth":
+        from omegaconf import OmegaConf
+
+        opt = OmegaConf.load(str(SRC_ROOT / args.config))
+        depth_cfg = opt.run.get("depth", {})
+        depth_source = depth_cfg.get("source", "py123d")
+        depth_fill = depth_cfg.get("fill", "nearest")
         cmd.extend(
             [
                 "--depth_source",
-                "py123d",
+                str(depth_source),
+                "--depth_fill",
+                str(depth_fill),
                 "--split",
                 split,
             ]
@@ -217,6 +225,12 @@ def apply_preset(args: argparse.Namespace) -> None:
             args.end_index = 3
         if args.config == "configs/py123d_nuscenes.yaml":
             args.config = "configs/py123d_nuscenes_smoke.yaml"
+    elif args.preset == "locateanything":
+        if args.py123d_max_scenes is None:
+            args.py123d_max_scenes = 1
+        if args.end_index == -1:
+            args.end_index = 1
+        args.config = "configs/py123d_nuscenes_locateanything.yaml"
     elif args.preset == "dev":
         if args.py123d_max_scenes is None:
             args.py123d_max_scenes = 10
@@ -236,7 +250,12 @@ def parse_steps(steps_arg: str) -> List[str]:
 
 def main():
     parser = argparse.ArgumentParser(description="Run nuScenes py123d LabelAny3D pipeline")
-    parser.add_argument("--preset", choices=["smoke", "dev", "full"], default="smoke")
+    parser.add_argument(
+        "--preset",
+        choices=["smoke", "dev", "full", "locateanything"],
+        default="smoke",
+        help="smoke/oneformer: py123d_nuscenes_smoke.yaml; locateanything: VLM detector preset",
+    )
     parser.add_argument("--config", default="configs/py123d_nuscenes.yaml")
     parser.add_argument("--save_dir", default="../experimental_results/nuScenes/")
     parser.add_argument("--steps", default="all", help="Comma list or 'all'")

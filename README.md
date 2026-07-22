@@ -152,6 +152,12 @@ One-scene `nuscenes-mini` smoke run with **fuse depth** (LiDAR + MoGe/DepthPro),
 
 Layout: surround cameras around center BEV (GT / Pred-2D / depth per cam); BEV meter grid with colored GT and blue Pred.
 
+**Summary video** — 40 consecutive keyframes @ **2 Hz** (~20 s), lightweight per-frame surround summaries:
+
+<video src="docs/assets/nuscenes_summary_40f_2hz.mp4" controls width="100%"></video>
+
+[Download MP4](docs/assets/nuscenes_summary_40f_2hz.mp4)
+
 Older examples: [OneFormer smoke](docs/assets/nuscenes_oneformer_smoke_summary.png) · [summary](docs/assets/nuscenes_smoke_summary.png) · [mesh](docs/assets/nuscenes_mesh_overlay.png) · [BEV](docs/assets/nuscenes_bev_3d.png)
 
 ### Recent updates (2026-07)

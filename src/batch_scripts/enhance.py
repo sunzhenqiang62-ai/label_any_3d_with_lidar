@@ -2,6 +2,7 @@ import argparse
 from omegaconf import OmegaConf
 import sys
 import os
+import shutil
 from tqdm import tqdm
 import torch
 sys.path = [
@@ -14,7 +15,11 @@ from batch_scripts.pipeline_loader import setup_pipeline_loop
 
 
 def _get_invsr_sampler():
-    from inference_invsr_us import get_parser, get_configs, InvSamplerSR
+    try:
+        from inference_invsr_us import get_parser, get_configs, InvSamplerSR
+    except Exception as exc:
+        print(f"InvSR unavailable ({exc}); copying input.png to enhanced/input.png.")
+        return None, None
 
     invsr_args = get_parser(description="My CLI tool")
     invsr_configs = get_configs(invsr_args)
@@ -71,4 +76,7 @@ if __name__ == "__main__":
             continue
         if sampler is None:
             sampler, invsr_args = _get_invsr_sampler()
+        if sampler is None:
+            shutil.copy2(out_dir / "input.png", enhance_path)
+            continue
         sampler.inference(f"{out_dir}/input.png", out_path=out_dir / "enhanced", bs=invsr_args.bs)

@@ -9,14 +9,17 @@ Based on [UVA LabelAny3D](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D)
 |--------|----------------|
 | **Four depth backends** | `estimate` \| `lidar` \| `py123d` \| **`fuse`** (LiDAR metric + MoGe/DepthPro hole fill) — same downstream layout |
 | **Fuse depth** | Keep projected LiDAR where valid; fill holes with aligned vision depth (`fuse_align: true`) |
+| **Fuse refinements (1–7)** | Soft blend, banded scale, median raster+densify, semantic priors, multi-view refine, edge fill, calib `(du,dv)` |
 | **Custom LiDAR** | Manifest + calib JSON → `depth_map.npy`, PLY, `cam_params.json` ([guide](docs/LIDAR_INPUT.md)) |
 | **py123d + nuScenes** | Arrow logs → depth + projected 3D-box masks (`nuscenes_annotations.json`) for crops ([guide](docs/PY123D_NUSCENES.md)) |
 | **LocateAnything detector** | VLM 2D detection via `segmentation.holistic: locateanything` + `run_locateanything` wrapper |
 | **Crop refinement** | OneFormer semantic masks **inside** LocateAnything 2D box crops (`crop_refinement: oneformer`) |
+| **Depth-fallback 3D** | Unreconned crops → `3dbbox` via depth (`source: depth_fallback`) so Pred BEV covers LA detections |
 | **Skip finished scenes** | Resume when `depth_map.npy` + `cam_params.json` already exist |
 | **Sparse LiDAR** | `--depth_fill nearest` fills empty depth pixels before alignment |
 | **CPU smoke tests** | `test_lidar_depth_smoke.py` (incl. fuse align), `test_py123d_coord.py`, `test_py123d_annotations.py` |
-| **Scene visualization** | `visualize_scene.py`: 3×N summary + full-width BEV; **meter grid** on X/Z axes; `compose` always stitches all panels |
+| **Scene visualization** | Surround cams around BEV; `--bev_extent=-50,50,-50,100`; `compose` stitches all panels |
+| **Summary video** | `render_summary_video.py`: consecutive-frame summaries → **2 Hz** MP4 |
 | **GT 3D boxes (py123d)** | `nuscenes_gt_3dbbox.json` per scene; BEV GT footprints without text labels |
 | **Model-based crops** | `detection_source: model` with **EntityV2**, **OneFormer**, or **[LocateAnything](https://research.nvidia.com/labs/lpr/locate-anything/)**; category filter via `allowed_categories` |
 
@@ -37,10 +40,12 @@ requirements-locateanything.txt
 src/batch_scripts/pipeline_loader.py
 src/batch_scripts/run_nuscenes.py
 src/tools/visualize_scene.py
+src/tools/render_summary_video.py      # multi-frame summary → 2 Hz video
 docs/LIDAR_INPUT.md
 docs/PY123D_NUSCENES.md
 docs/NUSCENES_EXPERIMENT.md
 scripts/run_nuscenes.sh
+scripts/mirrors_cn.sh                  # domestic PyPI / HF / GitHub mirrors
 requirements-py123d.txt                # optional: pip install -r requirements-py123d.txt
 env.sh                                 # helper to activate la3d env + CUDA toolchain
 ```
@@ -56,7 +61,7 @@ Modified: `src/batch_scripts/depth.py`, `src/batch_scripts/get_crops_enhanced.py
 | `py123d` | nuScenes (or other sets) already converted with [py123d](https://github.com/kesai-labs/py123d) | `--depth_source py123d --config configs/py123d_nuscenes.yaml` |
 | `fuse` | nuScenes / LiDAR scenes: metric LiDAR + dense vision fill | `run.depth.source: fuse` in config, or `--depth_source fuse` |
 
-**Fuse logic** (`src/geometry/lidar_depth.py`): rasterize LiDAR → optional hole fill → MoGe+DepthPro dense estimate → RANSAC scale on overlap → overwrite LiDAR pixels with metric values, fill remaining holes with aligned vision depth.
+**Fuse logic** (`src/geometry/lidar_depth.py`): rasterize LiDAR → optional hole fill → MoGe+DepthPro dense estimate → RANSAC / banded scale on overlap → soft-blend LiDAR with aligned vision depth → optional multi-view / edge / calib refine. Toggle flags live under `run.depth.*` in `py123d_nuscenes_fuse.yaml` / `locateanything` configs.
 
 All modes write the **same scene layout** (`input.png`, `depth_map.npy`, `cam_params.json`, …) so `enhance.py` → `whole.py` stay compatible.
 
@@ -114,10 +119,26 @@ Preset `locateanything` → `configs/py123d_nuscenes_locateanything.yaml`:
 **4. Visualization**
 
 ```bash
-python tools/visualize_scene.py --root ../experimental_results/nuScenes/nuscenes_val --mode compose
+python tools/visualize_scene.py \
+  --root ../experimental_results/nuScenes/nuscenes_val \
+  --mode compose \
+  --bev_extent=-50,50,-50,100
 ```
 
-`compose` builds `viz/summary.png`: **3 panels per row** (GT 2D, depth, crops, 3D boxes, mesh, point cloud), full-width **BEV** on the last row with **meter tick labels** on X/Z axes (GT by color, Pred in blue). `compose` always includes all default panels even when only `bev_3d` is requested alongside it.
+`compose` builds `viz/summary.png` with **surround cameras arranged around a center BEV** (front / side / back rings). Each camera stacks GT / Pred-2D / depth; BEV uses a meter grid (GT by color, Pred in blue). Prefer `--bev_extent=-50,50,-50,100` (equals form) so argparse does not treat leading `-` as flags.
+
+**5. Summary video (consecutive frames @ 2 Hz)**
+
+```bash
+source ../env.sh
+cd src
+python tools/render_summary_video.py \
+  --save_dir ../experimental_results/nuScenes_summary_video \
+  --num_frames 50 --fps 2 --scene_index 0 \
+  --bev_extent=-50,50,-50,100
+```
+
+Renders lightweight per-frame summaries (LiDAR depth + GT crops + depth-fallback 3D boxes) and stitches them into an MP4. `nuscenes-mini` scenes usually have ~40 keyframes; the script caps automatically.
 
 Pipeline order: `depth` → `enhance` → `crops` → `completion` → `elevation` → `reconstruction` → `whole`. All nuScenes steps use `--data_backend py123d`.
 
@@ -129,11 +150,21 @@ One-scene `nuscenes-mini` smoke run with **fuse depth** (LiDAR + MoGe/DepthPro),
 
 ![nuScenes LocateAnything smoke summary](docs/assets/nuscenes_locateanything_smoke_summary.png)
 
-Layout: row 1 — GT 2D, depth, crops; row 2 — 3D boxes, point cloud projection; row 3 — full-width BEV with meter distance grid (colored GT, blue Pred).
+Layout: surround cameras around center BEV (GT / Pred-2D / depth per cam); BEV meter grid with colored GT and blue Pred.
 
 Older examples: [OneFormer smoke](docs/assets/nuscenes_oneformer_smoke_summary.png) · [summary](docs/assets/nuscenes_smoke_summary.png) · [mesh](docs/assets/nuscenes_mesh_overlay.png) · [BEV](docs/assets/nuscenes_bev_3d.png)
 
-### Recent updates (2026-06)
+### Recent updates (2026-07)
+
+| Area | Summary |
+|------|---------|
+| **Fuse refinements** | Soft blend, banded scale align, median raster+densify, semantic sky/ground priors, multi-view surround refine, edge-aware fill, calib `(du,dv)` |
+| **Depth-fallback 3D** | `whole.py` / `util_3dbox.save_3d_bbox_from_depth_fallback` for unreconned crops beyond `SMOKE_MAX_RECON_OBJECTS` |
+| **Surround summary** | Cameras ringed around BEV; configurable `--bev_extent` / `LA3D_BEV_EXTENT` |
+| **Summary video** | `tools/render_summary_video.py` — consecutive frames → 2 Hz MP4 |
+| **Env / mirrors** | `env.sh` + `scripts/mirrors_cn.sh` for domestic PyPI/HF and CUDA toolchain defaults |
+
+### Earlier updates (2026-06)
 
 | Area | Summary |
 |------|---------|

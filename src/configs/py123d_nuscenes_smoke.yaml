@@ -20,7 +20,7 @@ run:
   py123d:
     dataset: 'nuscenes'
     split_type: 'val'
-    camera_key: 'CAM_FRONT'
+    camera_keys: 'all'
     lidar_key: 'merged'
     frame_index: null
     max_scenes: 5

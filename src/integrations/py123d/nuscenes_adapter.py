@@ -2,6 +2,7 @@
 Load nuScenes samples from py123d Arrow logs for LabelAny3D depth / crops pipeline.
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,6 +17,18 @@ from integrations.py123d.coord import (
     camera_global_to_world_to_cam,
     pinhole_intrinsics_to_K,
 )
+
+# nuScenes surround-view layout (row-major for 2x3 visualization grids).
+NUSCENES_SURROUND_CAMERAS = [
+    "CAM_FRONT_LEFT",
+    "CAM_FRONT",
+    "CAM_FRONT_RIGHT",
+    "CAM_BACK_LEFT",
+    "CAM_BACK",
+    "CAM_BACK_RIGHT",
+]
+NUSCENES_PRIMARY_CAMERA = "CAM_FRONT"
+_SURROUND_ALIASES = {"all", "surround", "surround_view", "surround_cameras"}
 
 
 def _require_py123d():
@@ -40,6 +53,16 @@ def _resolve_camera_id(camera_key: str):
         "CAM_FRONT": CameraID.PCAM_F0,
         "cam_front": CameraID.PCAM_F0,
         "front": CameraID.PCAM_F0,
+        "CAM_BACK": CameraID.PCAM_B0,
+        "cam_back": CameraID.PCAM_B0,
+        "CAM_FRONT_LEFT": CameraID.PCAM_L0,
+        "cam_front_left": CameraID.PCAM_L0,
+        "CAM_BACK_LEFT": CameraID.PCAM_L1,
+        "cam_back_left": CameraID.PCAM_L1,
+        "CAM_FRONT_RIGHT": CameraID.PCAM_R0,
+        "cam_front_right": CameraID.PCAM_R0,
+        "CAM_BACK_RIGHT": CameraID.PCAM_R1,
+        "cam_back_right": CameraID.PCAM_R1,
     }
     if key in aliases:
         return aliases[key]
@@ -47,6 +70,104 @@ def _resolve_camera_id(camera_key: str):
         f"Unknown camera_key '{camera_key}'. "
         f"Try PCAM_F0, CAM_FRONT, or one of: {[c.name for c in CameraID]}"
     )
+
+
+def resolve_camera_keys(
+    camera_key: Optional[str] = None,
+    camera_keys: Optional[Any] = None,
+) -> List[str]:
+    """Resolve single key, list, or surround alias into ordered unique camera keys."""
+    if camera_keys is not None:
+        if isinstance(camera_keys, str):
+            key = camera_keys.strip()
+            if key.lower() in _SURROUND_ALIASES:
+                return list(NUSCENES_SURROUND_CAMERAS)
+            return [key] if key else [NUSCENES_PRIMARY_CAMERA]
+        if isinstance(camera_keys, (list, tuple)):
+            resolved: List[str] = []
+            for item in camera_keys:
+                if not isinstance(item, str):
+                    continue
+                token = item.strip()
+                if not token:
+                    continue
+                if token.lower() in _SURROUND_ALIASES:
+                    resolved.extend(NUSCENES_SURROUND_CAMERAS)
+                elif token not in resolved:
+                    resolved.append(token)
+            return resolved or [NUSCENES_PRIMARY_CAMERA]
+
+    if camera_key:
+        key = camera_key.strip()
+        if key.lower() in _SURROUND_ALIASES:
+            return list(NUSCENES_SURROUND_CAMERAS)
+        return [key]
+    return [NUSCENES_PRIMARY_CAMERA]
+
+
+def is_multi_camera_keys(camera_keys: List[str]) -> bool:
+    return len(camera_keys) > 1
+
+
+def scene_camera_output_dir(scene_root: Path, camera_key: str, multi_camera: bool) -> Path:
+    if multi_camera:
+        return scene_root / camera_key
+    return scene_root
+
+
+def write_cameras_manifest(scene_root: Path, camera_keys: List[str]) -> None:
+    scene_root.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "cameras": list(camera_keys),
+        "primary_camera": NUSCENES_PRIMARY_CAMERA
+        if NUSCENES_PRIMARY_CAMERA in camera_keys
+        else camera_keys[0],
+    }
+    with open(scene_root / "cameras.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+
+
+def read_cameras_manifest(scene_root: Path) -> Optional[Dict[str, Any]]:
+    manifest_path = scene_root / "cameras.json"
+    if not manifest_path.exists():
+        return None
+    with open(manifest_path, "r") as f:
+        data = json.load(f)
+    return data if isinstance(data, dict) else None
+
+
+def discover_camera_view_dirs(scene_root: Path) -> List[Path]:
+    """
+    Return per-camera output dirs under a scene root.
+
+    Multi-camera layout: scene_root/CAM_*/input.png
+    Legacy single-camera layout: scene_root/input.png
+    """
+    scene_root = Path(scene_root)
+    manifest = read_cameras_manifest(scene_root)
+    camera_order = manifest.get("cameras") if manifest else NUSCENES_SURROUND_CAMERAS
+    views: List[Path] = []
+    for camera_key in camera_order:
+        view_dir = scene_root / camera_key
+        if view_dir.is_dir() and (view_dir / "input.png").exists():
+            views.append(view_dir)
+    if views:
+        return views
+    if (scene_root / "input.png").exists():
+        return [scene_root]
+    return []
+
+
+def get_primary_camera_view(scene_root: Path) -> Optional[Path]:
+    views = discover_camera_view_dirs(scene_root)
+    if not views:
+        return None
+    manifest = read_cameras_manifest(scene_root)
+    primary = (manifest or {}).get("primary_camera", NUSCENES_PRIMARY_CAMERA)
+    for view in views:
+        if view.name == primary:
+            return view
+    return views[0]
 
 
 def _resolve_lidar_id(lidar_key: str):
@@ -189,6 +310,7 @@ def extract_frame_sample(
         "annotations": annotations,
         "gt_3dbbox": gt_3dbbox,
         "scene_id": scene_id,
+        "camera_key": camera_key,
         "iteration": iteration,
         "file_name": f"{scene_id}.jpg",
     }
@@ -204,6 +326,7 @@ class Py123dNuScenesLoader:
         dataset_name: str = "nuscenes",
         max_scenes: Optional[int] = None,
         camera_key: str = "CAM_FRONT",
+        camera_keys: Optional[Any] = None,
         lidar_key: str = "merged",
         frame_index: Optional[int] = None,
         extra_rot_4x4: Optional[np.ndarray] = None,
@@ -222,6 +345,7 @@ class Py123dNuScenesLoader:
         self.split_type = split_type
         self.split = f"{dataset_name}_{split_type}"
         self.camera_key = camera_key
+        self.camera_keys = resolve_camera_keys(camera_key, camera_keys)
         self.lidar_key = lidar_key
         self.frame_index = frame_index
         self.extra_rot_4x4 = extra_rot_4x4
@@ -244,14 +368,21 @@ class Py123dNuScenesLoader:
     def get_scene_by_index(self, index: int):
         return self.scenes[index]
 
-    def extract_sample(self, index: int) -> Dict[str, Any]:
+    def extract_sample(self, index: int, camera_key: Optional[str] = None) -> Dict[str, Any]:
+        key = camera_key or self.camera_key
         return extract_frame_sample(
             self.scenes[index],
-            camera_key=self.camera_key,
+            camera_key=key,
             lidar_key=self.lidar_key,
             frame_index=self.frame_index,
             extra_rot_4x4=self.extra_rot_4x4,
         )
+
+    def extract_samples(self, index: int) -> List[Dict[str, Any]]:
+        return [
+            self.extract_sample(index, camera_key=key)
+            for key in self.camera_keys
+        ]
 
     def output_dir_name(self, sample: Dict[str, Any]) -> str:
         return sample["scene_id"]

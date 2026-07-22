@@ -10,8 +10,11 @@ import os
 import json
 import argparse
 import numpy as np
+from pathlib import Path
 from tqdm import tqdm
 from scipy.optimize import linear_sum_assignment
+
+from integrations.py123d.nuscenes_adapter import discover_camera_view_dirs
 
 
 # COCO categories with Omni3D-style IDs
@@ -144,6 +147,17 @@ def hungarian_matching(boxes0, boxes1):
     return matches
 
 
+def _iter_result_views(scene_dir: Path):
+    """Yield (label, view_path) for legacy single-view or multi-camera scene dirs."""
+    views = discover_camera_view_dirs(scene_dir)
+    if len(views) > 1:
+        for view_dir in views:
+            yield view_dir.name, view_dir
+        return
+    if (scene_dir / "input.png").exists() or (scene_dir / "3dbbox.json").exists():
+        yield scene_dir.name, scene_dir
+
+
 def combine_coco_results(results_dir, split, output_path, bbox_filename="3dbbox.json"):
     """
     Combine per-scene 3D bbox results into Omni3D format JSON.
@@ -174,119 +188,115 @@ def combine_coco_results(results_dir, split, output_path, bbox_filename="3dbbox.
     annotation_id = annotation_id_start
 
     for scene_name in tqdm(scene_ids, desc="Processing scenes"):
-        scene_path = os.path.join(scene_dir, scene_name)
-        bbox_path = os.path.join(scene_path, bbox_filename)
-        cam_path = os.path.join(scene_path, "cam_params.json")
-        bbox2d_path = os.path.join(scene_path, "bboxes.json")
+        scene_path = Path(scene_dir) / scene_name
+        for view_label, view_path in _iter_result_views(scene_path):
+            entry_name = f"{scene_name}/{view_label}" if view_label != scene_name else scene_name
+            bbox_path = view_path / bbox_filename
+            cam_path = view_path / "cam_params.json"
+            bbox2d_path = view_path / "bboxes.json"
 
-        # Skip if required files don't exist
-        if not os.path.exists(bbox_path):
-            print(f"Warning: Missing {bbox_filename} in {scene_name}, skipping")
-            continue
-        if not os.path.exists(cam_path):
-            print(f"Warning: Missing cam_params.json in {scene_name}, skipping")
-            continue
-
-        # Load camera parameters
-        with open(cam_path, 'r') as f:
-            cam_params = json.load(f)
-        K = np.array(cam_params["K"])
-        H, W = cam_params["H"], cam_params["W"]
-
-        # Create image entry
-        image_dict = {
-            "width": int(W),
-            "height": int(H),
-            "file_path": f"coco/images/{split}2017/{scene_name}.jpg",
-            "K": K.tolist(),
-            "src_90_rotate": 0,
-            "src_flagged": False,
-            "incomplete": False,
-            "id": image_id,
-            "dataset_id": dataset_id,
-        }
-
-        # Load 3D bbox predictions
-        with open(bbox_path, 'r') as f:
-            bbox_anno = json.load(f)
-
-        if len(bbox_anno) == 0:
-            print(f"Warning: Empty bbox in {scene_name}, skipping")
-            continue
-
-        # Load 2D bboxes if available (for Hungarian matching)
-        bbox2d_anno = None
-        if os.path.exists(bbox2d_path):
-            with open(bbox2d_path, 'r') as f:
-                bbox2d_anno = json.load(f)
-        else:
-            print(f"Warning: Missing bboxes.json in {scene_name}, using projected bbox as bbox2D_tight")
-
-        images.append(image_dict)
-
-        # Process annotations
-        local_annotations = []
-        for anno in bbox_anno:
-            category_name = anno.get("category_name", "").replace("_", " ")
-            category_id = CATEGORY_NAME_TO_ID.get(category_name, -1)
-
-            if category_id == -1:
-                print(f"Warning: Unknown category '{category_name}' in {scene_name}, skipping")
+            if not bbox_path.exists():
+                print(f"Warning: Missing {bbox_filename} in {entry_name}, skipping")
+                continue
+            if not cam_path.exists():
+                print(f"Warning: Missing cam_params.json in {entry_name}, skipping")
                 continue
 
-            # Project 3D bbox corners to 2D
-            corners = np.array(anno["bbox3D_cam"])
-            points_2d = [project_to_2d(np.array(point), K) for point in corners]
+            with open(cam_path, "r") as f:
+                cam_params = json.load(f)
+            K = np.array(cam_params["K"])
+            H, W = cam_params["H"], cam_params["W"]
 
-            min_x = min(p[0] for p in points_2d)
-            min_y = min(p[1] for p in points_2d)
-            max_x = max(p[0] for p in points_2d)
-            max_y = max(p[1] for p in points_2d)
-
-            bbox2D_proj = [min_x, min_y, max_x, max_y]
-            bbox2D_trunc = [
-                max(0, min_x),
-                max(0, min_y),
-                min(W, max_x),
-                min(H, max_y),
-            ]
-
-            new_anno = {
-                "behind_camera": False,
-                "truncation": 0.0,
-                "visibility": 1,
-                "segmentation_pts": -1,
-                "lidar_pts": -1,
-                "valid3D": True,
-                "category_name": category_name,
-                "category_id": category_id,
-                "image_id": image_id,
-                "id": annotation_id,
+            image_dict = {
+                "width": int(W),
+                "height": int(H),
+                "file_path": f"coco/images/{split}2017/{entry_name}.jpg",
+                "K": K.tolist(),
+                "src_90_rotate": 0,
+                "src_flagged": False,
+                "incomplete": False,
+                "id": image_id,
                 "dataset_id": dataset_id,
-                "center_cam": anno.get("center_cam"),
-                "dimensions": anno.get("dimensions"),
-                "R_cam": anno.get("R_cam"),
-                "bbox3D_cam": anno.get("bbox3D_cam"),
-                "bbox2D_proj": bbox2D_proj,
-                "bbox2D_trunc": bbox2D_trunc,
-                "depth_error": -1,
             }
-            local_annotations.append(new_anno)
-            annotation_id += 1
 
-        # Hungarian matching to get bbox2D_tight
-        if bbox2d_anno is not None and len(local_annotations) > 0 and len(bbox2d_anno) > 0:
-            truncated_boxes = np.array([anno["bbox2D_trunc"] for anno in local_annotations])
-            matches = hungarian_matching(truncated_boxes, np.array(bbox2d_anno))
-            for match in matches:
-                local_annotations[match[0]]["bbox2D_tight"] = bbox2d_anno[match[1]]
-        else:
-            # Fallback: use projected bbox as tight bbox
-            for anno in local_annotations:
-                anno["bbox2D_tight"] = anno["bbox2D_trunc"]
+            with open(bbox_path, "r") as f:
+                bbox_anno = json.load(f)
 
-        annotations.extend(local_annotations)
-        image_id += 1
+            if len(bbox_anno) == 0:
+                print(f"Warning: Empty bbox in {entry_name}, skipping")
+                continue
+
+            bbox2d_anno = None
+            if bbox2d_path.exists():
+                with open(bbox2d_path, "r") as f:
+                    bbox2d_anno = json.load(f)
+            else:
+                print(
+                    f"Warning: Missing bboxes.json in {entry_name}, "
+                    "using projected bbox as bbox2D_tight"
+                )
+
+            images.append(image_dict)
+
+            local_annotations = []
+            for anno in bbox_anno:
+                category_name = anno.get("category_name", "").replace("_", " ")
+                category_id = CATEGORY_NAME_TO_ID.get(category_name, -1)
+
+                if category_id == -1:
+                    print(f"Warning: Unknown category '{category_name}' in {entry_name}, skipping")
+                    continue
+
+                corners = np.array(anno["bbox3D_cam"])
+                points_2d = [project_to_2d(np.array(point), K) for point in corners]
+
+                min_x = min(p[0] for p in points_2d)
+                min_y = min(p[1] for p in points_2d)
+                max_x = max(p[0] for p in points_2d)
+                max_y = max(p[1] for p in points_2d)
+
+                bbox2D_proj = [min_x, min_y, max_x, max_y]
+                bbox2D_trunc = [
+                    max(0, min_x),
+                    max(0, min_y),
+                    min(W, max_x),
+                    min(H, max_y),
+                ]
+
+                new_anno = {
+                    "behind_camera": False,
+                    "truncation": 0.0,
+                    "visibility": 1,
+                    "segmentation_pts": -1,
+                    "lidar_pts": -1,
+                    "valid3D": True,
+                    "category_name": category_name,
+                    "category_id": category_id,
+                    "image_id": image_id,
+                    "id": annotation_id,
+                    "dataset_id": dataset_id,
+                    "center_cam": anno.get("center_cam"),
+                    "dimensions": anno.get("dimensions"),
+                    "R_cam": anno.get("R_cam"),
+                    "bbox3D_cam": anno.get("bbox3D_cam"),
+                    "bbox2D_proj": bbox2D_proj,
+                    "bbox2D_trunc": bbox2D_trunc,
+                    "depth_error": -1,
+                }
+                local_annotations.append(new_anno)
+                annotation_id += 1
+
+            if bbox2d_anno is not None and len(local_annotations) > 0 and len(bbox2d_anno) > 0:
+                truncated_boxes = np.array([anno["bbox2D_trunc"] for anno in local_annotations])
+                matches = hungarian_matching(truncated_boxes, np.array(bbox2d_anno))
+                for match in matches:
+                    local_annotations[match[0]]["bbox2D_tight"] = bbox2d_anno[match[1]]
+            else:
+                for anno in local_annotations:
+                    anno["bbox2D_tight"] = anno["bbox2D_trunc"]
+
+            annotations.extend(local_annotations)
+            image_id += 1
 
     # Build output JSON
     output = {

@@ -207,14 +207,23 @@ def run_fuse_depth(
     depth_fill="none",
     fuse_align=True,
     colors=None,
+    fuse_opts=None,
 ):
     """Fuse LiDAR point-cloud depth with dense vision depth."""
+    fuse_opts = dict(fuse_opts or {})
+    lidar_kwargs = {
+        "raster_mode": fuse_opts.get("raster_mode", "median"),
+        "densify_radius": int(fuse_opts.get("densify_radius", 1)),
+        "calib_refine": bool(fuse_opts.get("calib_refine", True)),
+        "calib_max_shift": int(fuse_opts.get("calib_max_shift", 2)),
+    }
     lidar = compute_lidar_depth(
         scene.image_np,
         points_world,
         calib,
         colors=colors,
         depth_fill=depth_fill,
+        **lidar_kwargs,
     )
     f_px = float(lidar["K"][0, 0])
     estimate_depth, _ = run_estimate_depth_maps(
@@ -225,7 +234,14 @@ def run_fuse_depth(
         lidar["valid_mask"],
         estimate_depth,
         align=fuse_align,
-        align_fn=align_depth,
+        align_fn=align_depth if fuse_align and not fuse_opts.get("banded_align", True) else None,
+        image_np=scene.image_np,
+        hit_count=lidar.get("hit_count"),
+        soft_blend=bool(fuse_opts.get("soft_blend", True)),
+        blend_radius=int(fuse_opts.get("blend_radius", 3)),
+        banded_align=bool(fuse_opts.get("banded_align", True)),
+        semantic_guide=bool(fuse_opts.get("semantic_guide", True)),
+        edge_fill=bool(fuse_opts.get("edge_fill", True)),
     )
     write_depth_artifacts(
         out_dir,
@@ -236,9 +252,20 @@ def run_fuse_depth(
         lidar["points_cam"],
         lidar["colors"],
     )
+    shift = lidar.get("proj_shift", (0.0, 0.0))
+    if abs(shift[0]) + abs(shift[1]) > 0:
+        print(f"  calib refine shift (du,dv)=({shift[0]:.0f},{shift[1]:.0f})")
 
 
-def run_fuse_py123d_depth(sample, out_dir, depthpro_model, depthpro_transform, depth_fill="none", fuse_align=True):
+def run_fuse_py123d_depth(
+    sample,
+    out_dir,
+    depthpro_model,
+    depthpro_transform,
+    depth_fill="none",
+    fuse_align=True,
+    fuse_opts=None,
+):
     """Fuse py123d LiDAR with vision depth and write nuScenes annotations."""
     scene = _NumpyImageScene(sample["image_np"])
     run_fuse_depth(
@@ -250,6 +277,7 @@ def run_fuse_py123d_depth(sample, out_dir, depthpro_model, depthpro_transform, d
         depthpro_transform,
         depth_fill=depth_fill,
         fuse_align=fuse_align,
+        fuse_opts=fuse_opts,
     )
     ann_path = Path(out_dir) / "nuscenes_annotations.json"
     with open(ann_path, "w") as f:
@@ -333,6 +361,18 @@ if __name__ == "__main__":
     depth_source = args.depth_source or opt.run.depth.get("source", "estimate")
     depth_fill = args.depth_fill or opt.run.depth.get("fill", "none")
     fuse_align = bool(opt.run.depth.get("fuse_align", True))
+    fuse_opts = {
+        "soft_blend": bool(opt.run.depth.get("soft_blend", True)),
+        "blend_radius": int(opt.run.depth.get("blend_radius", 3)),
+        "banded_align": bool(opt.run.depth.get("banded_align", True)),
+        "semantic_guide": bool(opt.run.depth.get("semantic_guide", True)),
+        "edge_fill": bool(opt.run.depth.get("edge_fill", True)),
+        "raster_mode": str(opt.run.depth.get("raster_mode", "median")),
+        "densify_radius": int(opt.run.depth.get("densify_radius", 1)),
+        "calib_refine": bool(opt.run.depth.get("calib_refine", True)),
+        "calib_max_shift": int(opt.run.depth.get("calib_max_shift", 2)),
+        "multiview_refine": bool(opt.run.depth.get("multiview_refine", True)),
+    }
     end_index = None if args.end_index < 0 else args.end_index
     has_py123d = bool(
         args.py123d_data_root
@@ -341,15 +381,27 @@ if __name__ == "__main__":
     )
 
     if depth_source == "py123d" or (depth_source == "fuse" and has_py123d):
-        from integrations.py123d.nuscenes_adapter import Py123dNuScenesLoader
+        from integrations.py123d.nuscenes_adapter import (
+            Py123dNuScenesLoader,
+            is_multi_camera_keys,
+            resolve_camera_keys,
+            scene_camera_output_dir,
+            write_cameras_manifest,
+        )
 
         py_cfg = opt.run.get("py123d", {})
+        camera_keys = resolve_camera_keys(
+            args.camera_key or py_cfg.get("camera_key", "CAM_FRONT"),
+            py_cfg.get("camera_keys"),
+        )
+        multi_camera = is_multi_camera_keys(camera_keys)
         loader = Py123dNuScenesLoader(
             data_root=args.py123d_data_root,
             split_type=args.py123d_split or py_cfg.get("split_type", "val"),
             dataset_name=args.py123d_dataset or py_cfg.get("dataset", "nuscenes"),
             max_scenes=args.py123d_max_scenes or py_cfg.get("max_scenes"),
-            camera_key=args.camera_key or py_cfg.get("camera_key", "CAM_FRONT"),
+            camera_key=camera_keys[0],
+            camera_keys=camera_keys,
             lidar_key=args.lidar_key or py_cfg.get("lidar_key", "merged"),
             frame_index=py_cfg.get("frame_index"),
         )
@@ -371,30 +423,47 @@ if __name__ == "__main__":
 
         desc = "fuse depth (py123d+vision)" if depth_source == "fuse" else "py123d depth"
         for i in tqdm(indices, desc=desc):
-            sample = loader.extract_sample(i)
-            output_dir = os.path.join(args.save_dir, split, loader.output_dir_name(sample))
-            scene = _NumpyImageScene(sample["image_np"])
-            out_dir = prepare_output_dirs(output_dir, scene)
-            print(f"Saving to {out_dir}")
-            if depth_already_done(out_dir):
-                if not (out_dir / "nuscenes_annotations.json").exists():
-                    with open(out_dir / "nuscenes_annotations.json", "w") as f:
-                        json.dump(sample["annotations"], f)
-                if not (out_dir / "nuscenes_gt_3dbbox.json").exists():
-                    with open(out_dir / "nuscenes_gt_3dbbox.json", "w") as f:
-                        json.dump(sample.get("gt_3dbbox", []), f)
-                continue
-            if depth_source == "fuse":
-                run_fuse_py123d_depth(
-                    sample,
-                    out_dir,
-                    depthpro_model,
-                    depthpro_transform,
-                    depth_fill=depth_fill,
-                    fuse_align=fuse_align,
-                )
-            else:
-                run_py123d_depth(sample, out_dir, depth_fill=depth_fill)
+            samples = loader.extract_samples(i)
+            scene_root = Path(args.save_dir) / split / loader.output_dir_name(samples[0])
+            if multi_camera:
+                write_cameras_manifest(scene_root, camera_keys)
+            for sample in samples:
+                camera_key = sample.get("camera_key", camera_keys[0])
+                out_dir = scene_camera_output_dir(scene_root, camera_key, multi_camera)
+                scene = _NumpyImageScene(sample["image_np"])
+                out_dir = prepare_output_dirs(out_dir, scene)
+                print(f"Saving to {out_dir}")
+                if depth_already_done(out_dir):
+                    if not (out_dir / "nuscenes_annotations.json").exists():
+                        with open(out_dir / "nuscenes_annotations.json", "w") as f:
+                            json.dump(sample["annotations"], f)
+                    if not (out_dir / "nuscenes_gt_3dbbox.json").exists():
+                        with open(out_dir / "nuscenes_gt_3dbbox.json", "w") as f:
+                            json.dump(sample.get("gt_3dbbox", []), f)
+                    continue
+                if depth_source == "fuse":
+                    run_fuse_py123d_depth(
+                        sample,
+                        out_dir,
+                        depthpro_model,
+                        depthpro_transform,
+                        depth_fill=depth_fill,
+                        fuse_align=fuse_align,
+                        fuse_opts=fuse_opts,
+                    )
+                else:
+                    run_py123d_depth(sample, out_dir, depth_fill=depth_fill)
+            if (
+                depth_source == "fuse"
+                and multi_camera
+                and fuse_opts.get("multiview_refine", True)
+            ):
+                from geometry.lidar_depth import refine_scene_multiview_depths
+
+                n_upd = refine_scene_multiview_depths(scene_root, camera_keys)
+                if n_upd:
+                    print(f"Multi-view depth refine updated {n_upd} cameras in {scene_root.name}")
+
 
     elif depth_source in ("lidar", "fuse"):
         if not args.manifest:
@@ -451,6 +520,7 @@ if __name__ == "__main__":
                     depth_fill=depth_fill,
                     fuse_align=fuse_align,
                     colors=colors,
+                    fuse_opts=fuse_opts,
                 )
             else:
                 run_lidar_depth(scene, out_dir, depth_fill=depth_fill)

@@ -10,20 +10,31 @@ run:
   data_backend: 'py123d'
   use_enhancement: True
   only_foreground: False
-  detection_source: 'model'
+  detection_source: 'gt'
   single_object: False
   reproject: False
   depth_edge_threshold: 0.0001
-  amodal_completion: null
+  amodal_completion: 'our'
   obj_rec: 'trellis'
   depth:
     source: 'fuse'
     fill: 'none'        # do not pre-fill LiDAR; vision fills holes after fusion
-    fuse_align: true    # RANSAC align vision to LiDAR in overlap
+    fuse_align: true
+    # LiDAR↔vision fusion refinements
+    soft_blend: true          # (1) confidence soft blend at LiDAR boundaries
+    blend_radius: 3
+    banded_align: true        # (2) distance-band scale alignment
+    raster_mode: 'median'     # (3) robust rasterize (+ densify_radius)
+    densify_radius: 1
+    semantic_guide: true      # (4) sky/ground/object priors
+    multiview_refine: true    # (5) surround cross-camera consistency
+    edge_fill: true           # (6) edge-aware hole fill
+    calib_refine: true        # (7) small (du,dv) projection refine
+    calib_max_shift: 2
   py123d:
-    dataset: 'nuscenes'
+    dataset: 'nuscenes-mini'  # matches dataset/py123d_smoke/logs/nuscenes-mini_*
     split_type: 'val'
-    camera_key: 'CAM_FRONT'
+    camera_keys: 'all'
     lidar_key: 'merged'
     frame_index: null
     max_scenes: 5

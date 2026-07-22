@@ -20,10 +20,20 @@ run:
     source: 'fuse'       # LiDAR prior + MoGe/DepthPro fill in holes
     fill: 'none'         # do not pre-fill LiDAR; vision fills after fusion
     fuse_align: true
+    soft_blend: true
+    blend_radius: 3
+    banded_align: true
+    raster_mode: 'median'
+    densify_radius: 1
+    semantic_guide: true
+    multiview_refine: true
+    edge_fill: true
+    calib_refine: true
+    calib_max_shift: 2
   py123d:
     dataset: 'nuscenes'
     split_type: 'val'
-    camera_key: 'CAM_FRONT'
+    camera_keys: 'all'
     lidar_key: 'merged'
     frame_index: null
     max_scenes: 5

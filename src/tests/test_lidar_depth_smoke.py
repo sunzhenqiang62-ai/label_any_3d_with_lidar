@@ -103,13 +103,19 @@ def test_fuse_lidar_estimate():
     tmp = Path(tempfile.mkdtemp())
     img, K, H, W, points_world = make_synthetic_scene(tmp)
     calib = load_calib(tmp / "calib.json")
-    computed = compute_lidar_depth(img, points_world, calib, depth_fill="none")
+    computed = compute_lidar_depth(
+        img, points_world, calib, depth_fill="none", densify_radius=0, calib_refine=False
+    )
     estimate = np.full((H, W), 8.0, dtype=np.float32)
     fused, fused_valid = fuse_lidar_with_estimate(
         computed["depth_map"],
         computed["valid_mask"],
         estimate,
         align=False,
+        soft_blend=False,
+        banded_align=False,
+        semantic_guide=False,
+        edge_fill=False,
     )
     assert computed["valid_mask"].sum() > 0
     assert np.allclose(fused[computed["valid_mask"]], 5.0, atol=0.05)
@@ -134,7 +140,9 @@ def test_fuse_lidar_estimate_with_align():
     tmp = Path(tempfile.mkdtemp())
     img, K, H, W, points_world = make_synthetic_scene(tmp)
     calib = load_calib(tmp / "calib.json")
-    computed = compute_lidar_depth(img, points_world, calib, depth_fill="none")
+    computed = compute_lidar_depth(
+        img, points_world, calib, depth_fill="none", densify_radius=0, calib_refine=False
+    )
     estimate = np.full((H, W), 2.0, dtype=np.float32)
     fused, fused_valid = fuse_lidar_with_estimate(
         computed["depth_map"],
@@ -142,6 +150,10 @@ def test_fuse_lidar_estimate_with_align():
         estimate,
         align=True,
         align_fn=scale_align,
+        soft_blend=False,
+        banded_align=False,
+        semantic_guide=False,
+        edge_fill=False,
     )
     holes = ~computed["valid_mask"]
     assert np.allclose(fused[computed["valid_mask"]], 5.0, atol=0.05)
@@ -149,6 +161,50 @@ def test_fuse_lidar_estimate_with_align():
     assert np.allclose(fused[holes], 5.0, atol=0.05)
     assert fused_valid.all()
     print("fuse_lidar_estimate_with_align: OK")
+
+
+def test_fuse_optimized_pipeline():
+    """Exercise soft blend + banded align + semantic + edge fill on synthetic data."""
+    from geometry.lidar_depth import align_depth_banded, lidar_confidence_map
+    from scipy.ndimage import binary_erosion
+
+    tmp = Path(tempfile.mkdtemp())
+    img, K, H, W, points_world = make_synthetic_scene(tmp)
+    calib = load_calib(tmp / "calib.json")
+    computed = compute_lidar_depth(
+        img,
+        points_world,
+        calib,
+        depth_fill="none",
+        raster_mode="median",
+        densify_radius=1,
+        calib_refine=True,
+        calib_max_shift=1,
+    )
+    estimate = np.full((H, W), 2.5, dtype=np.float32)
+    fused, fused_valid = fuse_lidar_with_estimate(
+        computed["depth_map"],
+        computed["valid_mask"],
+        estimate,
+        align=True,
+        image_np=img,
+        hit_count=computed.get("hit_count"),
+        soft_blend=True,
+        banded_align=True,
+        semantic_guide=True,
+        edge_fill=True,
+    )
+    core = binary_erosion(computed["valid_mask"], iterations=2)
+    if core.any():
+        assert np.allclose(fused[core], 5.0, atol=0.15), fused[core].mean()
+    assert fused_valid.sum() > computed["valid_mask"].sum()
+    conf = lidar_confidence_map(computed["valid_mask"], computed.get("hit_count"))
+    assert conf.max() > 0.5
+    banded = align_depth_banded(
+        estimate, computed["depth_map"], computed["valid_mask"], apply_mask=np.ones_like(estimate, dtype=bool)
+    )
+    assert np.median(banded[computed["valid_mask"]]) == np.median(banded[computed["valid_mask"]])
+    print("fuse_optimized_pipeline: OK")
 
 
 def test_manifest_loader_integration():
@@ -168,5 +224,6 @@ if __name__ == "__main__":
     test_build_outputs()
     test_fuse_lidar_estimate()
     test_fuse_lidar_estimate_with_align()
+    test_fuse_optimized_pipeline()
     test_manifest_loader_integration()
     print("All LiDAR depth smoke tests passed.")

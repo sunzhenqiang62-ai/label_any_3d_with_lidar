@@ -328,13 +328,23 @@ def save_3d_with_ground_alignment_bbox(scene_dir, bbox_method='pca'):
     return bbox_list
 
 
-def save_3d_bbox_from_depth_fallback(scene_dir):
+def save_3d_bbox_from_depth_fallback(
+    scene_dir,
+    exclude_obj_ids=None,
+    write_json=True,
+):
     """
     Fallback 3D bbox generation from 2D masks + depth when mesh-based bbox fails.
+
+    Args:
+        scene_dir: Scene directory path
+        exclude_obj_ids: Optional set of obj_id / stem names already covered by mesh bboxes
+        write_json: If True, overwrite 3dbbox_ground.json with this fallback-only list
     """
     from util import restore_mask_from_crop
 
     scene_dir = Path(scene_dir)
+    exclude = {str(x) for x in (exclude_obj_ids or [])}
     cam_path = scene_dir / "cam_params.json"
     depth_path = scene_dir / "depth_map.npy"
     crops_dir = scene_dir / "crops"
@@ -354,13 +364,15 @@ def save_3d_bbox_from_depth_fallback(scene_dir):
     bbox_list = []
     crop_paths = sorted(crops_dir.glob("*_reproj.png"))
     for crop_path in crop_paths:
-        obj_id = crop_path.stem.replace("_reproj", "")
-        if "_" in obj_id:
-            _, category = obj_id.split("_", 1)
+        obj_stem = crop_path.stem.replace("_reproj", "")
+        if "_" in obj_stem:
+            numeric_id, category = obj_stem.split("_", 1)
         else:
-            category = "object"
+            numeric_id, category = obj_stem, "object"
+        if numeric_id in exclude or obj_stem in exclude:
+            continue
 
-        crop_params_path = crops_dir / f"{obj_id}_crop_params.npy"
+        crop_params_path = crops_dir / f"{obj_stem}_crop_params.npy"
         if not crop_params_path.exists():
             continue
         crop_params = np.load(crop_params_path)
@@ -392,17 +404,21 @@ def save_3d_bbox_from_depth_fallback(scene_dir):
         vertices = convert_box_vertices(center_x, center_y, center_z, dx, dy, dz, 0.0)
         bbox_list.append(
             {
-                "obj_id": obj_id.split("_", 1)[0] if "_" in obj_id else obj_id,
+                "obj_id": numeric_id,
                 "category_name": category,
                 "center_cam": [center_x, center_y, center_z],
                 "R_cam": np.eye(3).tolist(),
                 "dimensions": [dz, dy, dx],
                 "bbox3D_cam": vertices.tolist(),
+                "source": "depth_fallback",
             }
         )
 
     # Last-resort fallback: use 2D bboxes when crop masks are unusable.
-    if len(bbox_list) == 0:
+    # Only used when nothing was produced for remaining crops (and no excludes
+    # already cover the scene) — skip if we already have some depth boxes or
+    # mesh exclusions imply a partial merge.
+    if len(bbox_list) == 0 and not exclude:
         bbox2d_path = scene_dir / "bboxes.json"
         if bbox2d_path.exists():
             with open(bbox2d_path, "r") as fp:
@@ -434,6 +450,8 @@ def save_3d_bbox_from_depth_fallback(scene_dir):
                     obj_id, category = obj_name.split("_", 1)
                 else:
                     obj_id, category = obj_name, "object"
+                if obj_id in exclude or obj_name in exclude:
+                    continue
                 bbox_list.append(
                     {
                         "obj_id": obj_id,
@@ -442,9 +460,11 @@ def save_3d_bbox_from_depth_fallback(scene_dir):
                         "R_cam": np.eye(3).tolist(),
                         "dimensions": [dz, dy, dx],
                         "bbox3D_cam": vertices.tolist(),
+                        "source": "depth_fallback_2d",
                     }
                 )
 
-    with open(scene_dir / "3dbbox_ground.json", "w") as fp:
-        json.dump(bbox_list, fp)
+    if write_json:
+        with open(scene_dir / "3dbbox_ground.json", "w") as fp:
+            json.dump(bbox_list, fp)
     return bbox_list

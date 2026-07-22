@@ -22,6 +22,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from batch_scripts.pipeline_loader import resolve_py123d_split
+from integrations.py123d.nuscenes_adapter import discover_camera_view_dirs, resolve_camera_keys
 
 ALL_STEPS = [
     "depth",
@@ -68,20 +69,43 @@ def _scene_dirs(save_dir: str, split: str) -> List[Path]:
     root = Path(save_dir) / split
     if not root.exists():
         return []
-    return sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name)
+    scenes: List[Path] = []
+    for p in sorted(root.iterdir(), key=lambda x: x.name):
+        if not p.is_dir():
+            continue
+        if (p / "input.png").exists() or (p / "cameras.json").exists():
+            scenes.append(p)
+            continue
+        if any((p / cam).is_dir() for cam in (
+            "CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT",
+            "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT",
+        )):
+            scenes.append(p)
+    return scenes
+
+
+def _camera_view_dirs(scene_dir: Path) -> List[Path]:
+    from integrations.py123d.nuscenes_adapter import discover_camera_view_dirs
+
+    views = discover_camera_view_dirs(scene_dir)
+    return views or ([scene_dir] if (scene_dir / "input.png").exists() else [])
 
 
 def scene_skip_complete(scene_dir: Path, step: str) -> bool:
     markers = SKIP_MARKERS.get(step, [])
     if not markers:
         return False
-    for m in markers:
-        p = scene_dir / m
-        if m == "crops":
-            if not p.exists() or not any(p.glob("*_reproj.png")):
+    views = _camera_view_dirs(scene_dir)
+    if not views:
+        return False
+    for view_dir in views:
+        for m in markers:
+            p = view_dir / m
+            if m == "crops":
+                if not p.exists() or not any(p.glob("*_reproj.png")):
+                    return False
+            elif not p.exists():
                 return False
-        elif not p.exists():
-            return False
     return True
 
 
@@ -145,12 +169,38 @@ def _run_cmd(cmd: List[str], dry_run: bool) -> int:
     return subprocess.call(cmd, cwd=str(SRC_ROOT))
 
 
+def _step_end_index(step: str, args: argparse.Namespace, opt) -> int:
+    """depth iterates py123d scenes; later steps iterate per-camera output views."""
+    if step == "depth":
+        if args.py123d_max_scenes is not None:
+            return args.py123d_max_scenes
+        return max(args.end_index, 1)
+    if args.end_index < 0:
+        return -1
+    py_cfg = opt.run.get("py123d", {}) or {}
+    camera_keys = resolve_camera_keys(
+        py_cfg.get("camera_key", "CAM_FRONT"),
+        py_cfg.get("camera_keys"),
+    )
+    views_per_scene = max(len(camera_keys), 1)
+    scene_count = (
+        args.py123d_max_scenes
+        if args.py123d_max_scenes is not None
+        else max(args.end_index, 1)
+    )
+    return scene_count * views_per_scene
+
+
 def build_step_cmd(
     step: str,
     args: argparse.Namespace,
     split: str,
 ) -> List[str]:
     script, extra = STEP_SCRIPTS[step]
+    from omegaconf import OmegaConf
+
+    opt = OmegaConf.load(str(SRC_ROOT / args.config))
+    step_end = _step_end_index(step, args, opt)
     cmd = [
         sys.executable,
         script,
@@ -161,15 +211,12 @@ def build_step_cmd(
         "--start_index",
         str(args.start_index),
         "--end_index",
-        str(args.end_index),
+        str(step_end),
         "--gpu_idx",
         str(args.gpu_idx),
     ]
 
     if step == "depth":
-        from omegaconf import OmegaConf
-
-        opt = OmegaConf.load(str(SRC_ROOT / args.config))
         depth_cfg = opt.run.get("depth", {})
         depth_source = depth_cfg.get("source", "py123d")
         depth_fill = depth_cfg.get("fill", "nearest")
@@ -229,7 +276,8 @@ def apply_preset(args: argparse.Namespace) -> None:
         if args.py123d_max_scenes is None:
             args.py123d_max_scenes = 1
         if args.end_index == -1:
-            args.end_index = 1
+            # 1 scene × 6 surround cameras (per-view steps use all output views)
+            args.end_index = args.py123d_max_scenes
         args.config = "configs/py123d_nuscenes_locateanything.yaml"
     elif args.preset == "dev":
         if args.py123d_max_scenes is None:

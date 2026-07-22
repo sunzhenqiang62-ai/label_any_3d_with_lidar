@@ -520,13 +520,52 @@ def align_to_depth_match(mask, depth_map, object_name, project_root, model):
         return np.eye(4)
         
     # Get depth values in overlapping region
-    depth_map_values = depth_map[overlap_mask]
-    depth_render_values = depth[overlap_mask]
-    
-    # Calculate scale factor between the two depth maps
-    # Using median ratio to be robust to outliers
+    depth_map_values = depth_map[overlap_mask].astype(np.float64)
+    depth_render_values = depth[overlap_mask].astype(np.float64)
+
+    valid = (
+        np.isfinite(depth_map_values)
+        & np.isfinite(depth_render_values)
+        & (depth_map_values > 1e-4)
+        & (depth_render_values > 1e-4)
+    )
+    depth_map_values = depth_map_values[valid]
+    depth_render_values = depth_render_values[valid]
+    if depth_map_values.size < 8:
+        print("Too few valid depth samples for alignment")
+        return np.eye(4)
+
+    # Drop discrete far fill plateaus (common in LiDAR nearest/fuse hole fill).
+    rounded = np.round(depth_map_values, 2)
+    vals, counts = np.unique(rounded, return_counts=True)
+    med = float(np.median(depth_map_values))
+    fill_like = (counts >= max(20, int(0.12 * rounded.size))) & (vals >= med * 1.02)
+    if fill_like.any():
+        keep = ~np.isin(rounded, vals[fill_like])
+        if keep.sum() >= 8:
+            depth_map_values = depth_map_values[keep]
+            depth_render_values = depth_render_values[keep]
+
+    # Adaptive trim: far-heavy tails => closer cluster; else keep near-median band.
+    lo = float(np.percentile(depth_map_values, 10))
+    mid = float(np.percentile(depth_map_values, 50))
+    hi = float(np.percentile(depth_map_values, 90))
+    lower_span = max(mid - lo, 1e-6)
+    upper_span = max(hi - mid, 0.0)
+    if upper_span > max(lower_span * 1.1, 5.0):
+        gate = float(np.percentile(depth_map_values, 40))
+        keep = depth_map_values <= gate
+    else:
+        keep = depth_map_values <= hi
+    if keep.sum() >= 8:
+        depth_map_values = depth_map_values[keep]
+        depth_render_values = depth_render_values[keep]
+
     depth_ratios = depth_map_values / depth_render_values
-    scale = np.median(depth_ratios)
+    scale = float(np.median(depth_ratios))
+    if not np.isfinite(scale) or scale <= 0:
+        print(f"Invalid depth scale {scale}; skipping alignment")
+        return np.eye(4)
     
     # Create transformation matrix with scale
     transform = np.eye(4)

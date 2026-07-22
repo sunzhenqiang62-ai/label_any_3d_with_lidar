@@ -62,9 +62,13 @@ def _clear_oneformer_cache():
 
 def _get_oneformer(device):
     if device not in _ONEFORMER_CACHE:
-        from model_wrappers import initialize_oneformer
+        try:
+            from model_wrappers import initialize_oneformer
 
-        _ONEFORMER_CACHE[device] = initialize_oneformer(device)
+            _ONEFORMER_CACHE[device] = initialize_oneformer(device)
+        except Exception as exc:
+            print(f"OneFormer unavailable ({exc}); using box masks for crop refinement.")
+            _ONEFORMER_CACHE[device] = None
     return _ONEFORMER_CACHE[device]
 
 
@@ -90,7 +94,10 @@ def _unmap_letterbox_sem(sem_canvas, orig_size, layout):
 
 def _oneformer_semantic_map(image_pil, device, canvas_size=1024):
     """Run OneFormer semantic segmentation; return label map aligned to image_pil size."""
-    predictor, metadata, thing_classes_ids = _get_oneformer(device)
+    oneformer = _get_oneformer(device)
+    if oneformer is None:
+        return None, None, None
+    predictor, metadata, thing_classes_ids = oneformer
     infer_pil, layout = _letterbox_for_oneformer(image_pil, canvas_size=canvas_size)
     image_np = np.array(infer_pil)[:, :, ::-1]
     predictions = predictor(image_np, "semantic")["sem_seg"].argmax(dim=0).cpu().numpy()
@@ -141,6 +148,8 @@ def _oneformer_mask_in_box(image_pil, box_xyxy, label_hint, device, pad_ratio=0.
 
     crop = image_pil.crop((px1, py1, px2, py2))
     sem, metadata, thing_classes_ids = _oneformer_semantic_map(crop, device)
+    if sem is None:
+        return None
     class_ids = _class_ids_for_label_hint(label_hint, metadata.stuff_classes, thing_classes_ids)
     if not class_ids:
         class_ids = list(thing_classes_ids)
@@ -160,7 +169,7 @@ def _oneformer_mask_in_box(image_pil, box_xyxy, label_hint, device, pad_ratio=0.
         max(0, ix1) : min(cw, ix2),
     ] = True
 
-    n_comp, comps = cc_label(binary)
+    comps, n_comp = cc_label(binary)
     best_mask, best_score = None, -1
     for comp_id in range(1, n_comp + 1):
         m = comps == comp_id
@@ -254,7 +263,7 @@ def _oneformer_instance_masks(image_pil, device):
         binary = (sem == tid).astype(np.uint8)
         if binary.sum() < 100:
             continue
-        n_comp, comps = cc_label(binary)
+        comps, n_comp = cc_label(binary)
         name = _normalize_label(stuff_classes[tid])
         for comp_id in range(1, n_comp + 1):
             m = comps == comp_id
@@ -439,6 +448,22 @@ if __name__ == "__main__":
         enhanced_image = Image.open(enhanced_path)
         scene.image_pil = enhanced_image.convert("RGB")
         scene.image_np = np.array(enhanced_image)
+        enh_h, enh_w = scene.image_np.shape[:2]
+
+        # Annotations / depth live in native (input.png) resolution. InvSR enhance is typically 4x.
+        native_path = out_dir / "input.png"
+        if native_path.exists():
+            native_w, native_h = Image.open(native_path).size
+        else:
+            native_w, native_h = enh_w, enh_h
+        scale_x = enh_w / float(native_w)
+        scale_y = enh_h / float(native_h)
+        if abs(scale_x - scale_y) > 1e-3:
+            print(
+                f"Warning: non-uniform enhance scale sx={scale_x:.3f} sy={scale_y:.3f}; "
+                "crop_params assume isotropic scale"
+            )
+        enhance_scale = float(0.5 * (scale_x + scale_y))
 
         if use_model_detection:
             masks, instance_labels, bboxes = _model_segment_image(
@@ -449,38 +474,44 @@ if __name__ == "__main__":
                 print(f"No model-detected objects in {img_name}")
                 continue
             object_ids = np.arange(len(masks))
+            # Model masks/boxes are already in enhanced image coordinates.
+            bboxes = np.array(bboxes, dtype=np.float32)
+            bboxes_native = bboxes / np.array([scale_x, scale_y, scale_x, scale_y], dtype=np.float32)
         else:
             annotations = scene_entry["annotations"]
             if not annotations:
                 print(f"No annotations found for {img_name}")
                 continue
+            # GT boxes/polygons are stored in native input.png coordinates.
             bboxes, masks, object_ids, instance_labels = read_bounding_boxes_segmentations(
-                annotations, scene.image_pil.size
+                annotations, (native_w, native_h)
             )
             if len(masks[object_ids]) == 0:
                 print(f"No valid objects found in {img_name}")
                 continue
             bboxes = BoxMode.convert(np.array(bboxes), BoxMode.XYWH_ABS, BoxMode.XYXY_ABS)
-
-        scaled_masks = []
-        for mask in masks:
-            mask = mask.astype(np.uint8)
-            new_size = (mask.shape[1] * 4, mask.shape[0] * 4)
-            scaled_mask = cv2.resize(mask, new_size, interpolation=cv2.INTER_NEAREST)
-            scaled_masks.append(scaled_mask)
-        masks = np.array(scaled_masks)
-
-        if use_model_detection:
-            bboxes = np.array(bboxes, dtype=np.float32)
+            bboxes_native = np.array(bboxes, dtype=np.float32)
+            # Upsample masks/boxes to the enhanced canvas for cropping.
+            scaled_masks = []
+            for mask in masks:
+                scaled_masks.append(
+                    cv2.resize(
+                        mask.astype(np.uint8),
+                        (enh_w, enh_h),
+                        interpolation=cv2.INTER_NEAREST,
+                    ).astype(bool)
+                )
+            masks = np.array(scaled_masks)
+            bboxes = bboxes_native * np.array([scale_x, scale_y, scale_x, scale_y], dtype=np.float32)
 
         selected_bboxes = []
         for j in range(len(masks) - 1, -1, -1):
             if use_model_detection:
                 label = instance_labels[j]
-                bbox = bboxes[j]
+                bbox_native = bboxes_native[j]
             else:
                 label = instance_labels[object_ids[j]]
-                bbox = bboxes[object_ids[j]]
+                bbox_native = bboxes_native[object_ids[j]]
             label = label.replace(" (", ", ").replace(")", "")
             obj_id = f"{j}_{label.replace(' ', '_')}"
 
@@ -496,26 +527,30 @@ if __name__ == "__main__":
             if bh < 8 or bw < 8:
                 print(f"Skipped degenerate bbox: {obj_id} ({bw}x{bh})")
                 continue
-            selected_bboxes.append(bbox.tolist() if hasattr(bbox, "tolist") else list(bbox))
+            selected_bboxes.append(
+                bbox_native.tolist() if hasattr(bbox_native, "tolist") else list(bbox_native)
+            )
             crop_path = out_dir / "crops" / f"{obj_id}_reproj.png"
             crop_params_path = out_dir / "crops" / f"{obj_id}_crop_params.npy"
             if not crop_path.exists() or not crop_params_path.exists():
                 crop_mask = mask
-                img_h, img_w = scene.image_np.shape[:2]
-                if crop_mask.shape[0] != img_h or crop_mask.shape[1] != img_w:
+                if crop_mask.shape[0] != enh_h or crop_mask.shape[1] != enh_w:
                     crop_mask = cv2.resize(
                         crop_mask.astype(np.uint8),
-                        (img_w, img_h),
+                        (enh_w, enh_h),
                         interpolation=cv2.INTER_NEAREST,
                     ).astype(bool)
                 crop, crop_params = crop_object(scene.image_np, crop_mask, crop_size)
                 crop.save(crop_path)
-                scale_xy = mask.shape[1] / img_w
-                crop_params = np.array([
-                    crop_params[0] / scale_xy,
-                    crop_params[1] / scale_xy,
-                    crop_params[2] * scale_xy,
-                ])
+                # whole.py restores masks onto native-resolution depth_map.
+                crop_params = np.array(
+                    [
+                        crop_params[0] / enhance_scale,
+                        crop_params[1] / enhance_scale,
+                        crop_params[2] * enhance_scale,
+                    ],
+                    dtype=np.float64,
+                )
                 np.save(crop_params_path, crop_params)
         with open(out_dir / "bboxes.json", "w") as f:
             json.dump(np.array(selected_bboxes).tolist(), f)

@@ -128,14 +128,29 @@ if __name__ == "__main__":
         if len(scene_mesh.geometry) > 0:
             scene_mesh.export(out_dir / "reconstruction" / "full_scene.glb")
             print("Going to save ground aligned bbox")
-            bbox_list = save_3d_with_ground_alignment_bbox(out_dir)
+            mesh_bbox_list = save_3d_with_ground_alignment_bbox(out_dir)
         else:
             print("No reconstructed meshes; using depth fallback for 3D boxes.")
-            bbox_list = []
+            mesh_bbox_list = []
 
+        # Mesh recon may be capped (e.g. SMOKE_MAX_RECON_OBJECTS). Fill remaining
+        # crops with depth-based 3D boxes so Pred count tracks 2D detections.
+        have_ids = {str(b.get("obj_id")) for b in mesh_bbox_list}
+        fallback_bbox_list = save_3d_bbox_from_depth_fallback(
+            out_dir, exclude_obj_ids=have_ids, write_json=False
+        )
+        if fallback_bbox_list:
+            print(
+                f"Depth fallback added {len(fallback_bbox_list)} boxes "
+                f"(mesh={len(mesh_bbox_list)}, exclude={sorted(have_ids)})"
+            )
+        bbox_list = list(mesh_bbox_list) + list(fallback_bbox_list)
         if len(bbox_list) == 0:
-            print("Mesh-based bbox is empty; using depth fallback bbox.")
-            bbox_list = save_3d_bbox_from_depth_fallback(out_dir)
+            print("No mesh or depth boxes; retrying full depth fallback.")
+            bbox_list = save_3d_bbox_from_depth_fallback(out_dir, write_json=False)
+
+        with open(out_dir / "3dbbox_ground.json", "w") as fp:
+            json.dump(bbox_list, fp)
         draw_cube(out_dir, is_ground=True)
 
         if os.path.exists(out_dir / "3dbbox_ground.json"):

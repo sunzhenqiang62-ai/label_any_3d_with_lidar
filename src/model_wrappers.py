@@ -155,6 +155,34 @@ def load_trellis():
     return _loaded_models['trellis']
 
 
+def _export_trellis_glb(outputs, out_glb):
+    """Export TRELLIS outputs to GLB; fall back to untextured mesh when nvdiffrast is absent."""
+    import numpy as np
+    import trimesh
+
+    mesh_result = outputs["mesh"][0]
+    try:
+        from trellis.utils import postprocessing_utils
+
+        glb = postprocessing_utils.to_glb(
+            outputs["gaussian"][0],
+            mesh_result,
+            texture_size=1024,
+        )
+        glb.export(str(out_glb))
+        return mesh_result
+    except ImportError as import_err:
+        print(f"TRELLIS postprocessing unavailable ({import_err}); exporting untextured mesh.")
+    except Exception as post_err:
+        print(f"TRELLIS to_glb failed ({post_err}); exporting untextured mesh.")
+
+    verts = mesh_result.vertices.detach().cpu().numpy()
+    faces = mesh_result.faces.detach().cpu().numpy()
+    verts = verts @ np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
+    trimesh.Trimesh(verts, faces).export(str(out_glb))
+    return mesh_result
+
+
 def infer_with_trellis(out_dir, obj_id):
     """
     Run TRELLIS inference on a single object.
@@ -169,8 +197,7 @@ def infer_with_trellis(out_dir, obj_id):
     from pathlib import Path
     from PIL import Image
 
-    _ensure_path('../external/TRELLIS')
-    from trellis.utils import postprocessing_utils
+    _ensure_path("../external/TRELLIS")
 
     print("Starting TRELLIS inference...")
 
@@ -182,27 +209,10 @@ def infer_with_trellis(out_dir, obj_id):
 
         outputs = pipeline.run(image, seed=1)
         out_glb = Path(out_dir) / "object_space" / f"{obj_id}.glb"
-
-        try:
-            glb = postprocessing_utils.to_glb(
-                outputs['gaussian'][0],
-                outputs['mesh'][0],
-                texture_size=1024,
-            )
-            glb.export(str(out_glb))
-        except Exception as post_err:
-            import trimesh
-            import numpy as np
-
-            print(f"TRELLIS to_glb failed ({post_err}); exporting untextured mesh.")
-            mesh_result = outputs['mesh'][0]
-            verts = mesh_result.vertices.detach().cpu().numpy()
-            faces = mesh_result.faces.detach().cpu().numpy()
-            verts = verts @ np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
-            trimesh.Trimesh(verts, faces).export(str(out_glb))
+        mesh_result = _export_trellis_glb(outputs, out_glb)
 
         print(f"TRELLIS inference complete: {out_glb}")
-        return outputs['mesh'][0]
+        return mesh_result
 
     except Exception as e:
         print(f"TRELLIS inference failed: {e}")

@@ -3,7 +3,8 @@ Unified model wrappers for all external models used in the pipeline.
 
 Models included:
 - Reconstruction: TRELLIS, Hunyuan3D, DreamGaussian
-- Depth: MoGe, DepthPro
+- Depth: MoGe-2 (metric; MoGe-3 when released), optional DepthPro legacy align
+- Detection: EntityV2, OneFormer, LocateAnything
 - Matching: MASt3R
 - Enhancement: InvSR
 - Segmentation (in-the-wild): EntityV2, CLIPSeg, OneFormer, LocateAnything
@@ -136,6 +137,32 @@ def _ensure_path(external_path):
         sys.path.insert(0, external_path)
 
 
+def _patch_utils3d_perspective_from_fov_xy():
+    """
+    Newer utils3d removed perspective_from_fov_xy; TRELLIS postprocessing still needs it.
+    Map to perspective_from_fov(fov_x=..., fov_y=..., near=..., far=...).
+    """
+    try:
+        import utils3d.torch as ut
+    except ImportError:
+        return
+    if hasattr(ut, "perspective_from_fov_xy"):
+        return
+
+    def perspective_from_fov_xy(fov_x, fov_y, near, far):
+        return ut.perspective_from_fov(fov_x=fov_x, fov_y=fov_y, near=near, far=far)
+
+    ut.perspective_from_fov_xy = perspective_from_fov_xy
+    # Also expose on transforms submodule if already imported.
+    try:
+        import utils3d.torch.transforms as transforms
+
+        if not hasattr(transforms, "perspective_from_fov_xy"):
+            transforms.perspective_from_fov_xy = perspective_from_fov_xy
+    except Exception:
+        pass
+
+
 # =============================================================================
 # TRELLIS - Image to 3D Reconstruction
 # =============================================================================
@@ -144,6 +171,7 @@ def load_trellis():
     if 'trellis' not in _loaded_models:
         _ensure_path('../external/TRELLIS')
         os.environ['ATTN_BACKEND'] = 'xformers'
+        _patch_utils3d_perspective_from_fov_xy()
 
         from trellis.pipelines import TrellisImageTo3DPipeline
 
@@ -160,6 +188,7 @@ def _export_trellis_glb(outputs, out_glb):
     import numpy as np
     import trimesh
 
+    _patch_utils3d_perspective_from_fov_xy()
     mesh_result = outputs["mesh"][0]
     try:
         from trellis.utils import postprocessing_utils
@@ -323,7 +352,7 @@ def infer_with_hunyuan(out_dir, obj_id, gen_seed=0, gen_steps=50, max_faces_num=
 
 
 # =============================================================================
-# MoGe - Monocular Geometry Estimation
+# MoGe - Monocular Geometry Estimation (MoGe-2 metric by default; MoGe-3 when released)
 # =============================================================================
 def load_moge():
     """Load MoGe model (lazy loading)"""
@@ -331,24 +360,25 @@ def load_moge():
         _ensure_path('../external/MoGe')
         from infer_moge import infer_geometry_on_image as _infer_moge
         _loaded_models['moge'] = _infer_moge
-        print("MoGe model loaded.")
+        print("MoGe inference wrapper loaded.")
 
     return _loaded_models['moge']
 
 
-def infer_with_moge(image_path, out_dir):
+def infer_with_moge(image_path, out_dir, **kwargs):
     """
     Run MoGe inference to get depth and camera intrinsics.
 
     Args:
         image_path: Path to input image
         out_dir: Output directory
+        **kwargs: forwarded to infer_geometry_on_image (version, f_px, ...)
 
     Returns:
         Tuple of (points, depth_map, mask, K)
     """
     infer_fn = load_moge()
-    return infer_fn(image_path, out_dir)
+    return infer_fn(image_path, out_dir, **kwargs)
 
 
 # =============================================================================

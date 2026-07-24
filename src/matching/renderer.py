@@ -23,9 +23,17 @@ class GLBRenderer:
         self.io.register_meshes_format(MeshGlbFormat())
         
     def load_mesh(self, glb_path):
-        """Load GLB model from file"""
+        """Load GLB model from file; synthesize vertex textures if missing."""
+        from pytorch3d.renderer import TexturesVertex
+
         mesh = self.io.load_mesh(glb_path, include_textures=True)
-        return mesh.to(self.device)
+        mesh = mesh.to(self.device)
+        # Untextured TRELLIS exports (utils3d FOV shim fallback) have no textures;
+        # HardPhongShader requires them.
+        if mesh.textures is None:
+            verts = mesh.verts_padded()
+            mesh.textures = TexturesVertex(verts_features=torch.ones_like(verts) * 0.7)
+        return mesh
     
     def setup_camera(self, distance=1.5, elevation=0.0, azimuth=0.0):
         """Setup camera parameters"""

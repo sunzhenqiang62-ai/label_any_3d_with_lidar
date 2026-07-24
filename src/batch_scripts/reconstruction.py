@@ -42,9 +42,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--data_backend",
-        choices=["coco", "py123d"],
+        choices=["coco", "py123d", "bad_case_pkl"],
         default=None,
-        help="coco: COCONUT; py123d: scene dirs from depth.py --depth_source py123d",
+        help="coco / py123d / bad_case_pkl scene dirs under save_dir/split",
     )
 
     args, extras = parser.parse_known_args()

@@ -7,17 +7,20 @@ Based on [UVA LabelAny3D](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D)
 
 | Change | What it does |
 |--------|----------------|
-| **Four depth backends** | `estimate` \| `lidar` \| `py123d` \| **`fuse`** (LiDAR metric + MoGe/DepthPro hole fill) — same downstream layout |
-| **Fuse depth** | Keep projected LiDAR where valid; fill holes with aligned vision depth (`fuse_align: true`) |
+| **Five depth backends** | `estimate` \| `lidar` \| `py123d` \| **`fuse`** \| **`bad_case_pkl`** — same downstream layout |
+| **Fuse depth** | Keep projected LiDAR where valid; fill holes with **MoGe-2** metric depth (`estimator: moge2`; MoGe-3 when released) |
 | **Fuse refinements (1–7)** | Soft blend, banded scale, median raster+densify, semantic priors, multi-view refine, edge fill, calib `(du,dv)` |
+| **bad_case PKL** | data-pipeline-4d pickle → multi-cam RGB + LiDAR PCD + calib; fuse with MoGe-2; no GT → LocateAnything 2D |
+| **Six-class taxonomy** | `SED_CAR` / `LTRUCKS` / `BUS` / `PEDESTRIAN` / `CYCLIST` / `TRICYCLIST` → internal labels via `label_map` |
 | **Custom LiDAR** | Manifest + calib JSON → `depth_map.npy`, PLY, `cam_params.json` ([guide](docs/LIDAR_INPUT.md)) |
 | **py123d + nuScenes** | Arrow logs → depth + projected 3D-box masks (`nuscenes_annotations.json`) for crops ([guide](docs/PY123D_NUSCENES.md)) |
 | **LocateAnything detector** | VLM 2D detection via `segmentation.holistic: locateanything` + `run_locateanything` wrapper |
 | **Crop refinement** | OneFormer semantic masks **inside** LocateAnything 2D box crops (`crop_refinement: oneformer`) |
 | **Depth-fallback 3D** | Unreconned crops → `3dbbox` via depth (`source: depth_fallback`) so Pred BEV covers LA detections |
+| **BEV size / yaw fix** | Filter dirty depth points; vehicle L/W priors; mesh-alias for taxonomy rename; ego-forward yaw fallback |
 | **Skip finished scenes** | Resume when `depth_map.npy` + `cam_params.json` already exist |
 | **Sparse LiDAR** | `--depth_fill nearest` fills empty depth pixels before alignment |
-| **CPU smoke tests** | `test_lidar_depth_smoke.py` (incl. fuse align), `test_py123d_coord.py`, `test_py123d_annotations.py` |
+| **CPU smoke tests** | `test_lidar_depth_smoke.py`, `test_py123d_*`, `test_bev_yaw.py` |
 | **Scene visualization** | Surround cams around BEV; `--bev_extent=-50,50,-50,100`; `compose` stitches all panels |
 | **Summary video** | `render_summary_video.py`: consecutive-frame summaries → **2 Hz** MP4 |
 | **GT 3D boxes (py123d)** | `nuscenes_gt_3dbbox.json` per scene; BEV GT footprints without text labels |
@@ -29,18 +32,21 @@ Based on [UVA LabelAny3D](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D)
 src/geometry/lidar_depth.py          # LiDAR → depth_map / PLY / cam_params
 src/batch_scripts/lidar_loader.py
 src/batch_scripts/py123d_loader.py
-src/integrations/py123d/              # nuScenes adapter (coord, annotations, loader)
+src/integrations/py123d/              # nuScenes + bad_case_pkl adapters
+src/integrations/py123d/bad_case_pkl_adapter.py
 src/configs/lidar.yaml
 src/configs/py123d_nuscenes.yaml
 src/configs/py123d_nuscenes_smoke.yaml
 src/configs/py123d_nuscenes_fuse.yaml
 src/configs/py123d_nuscenes_locateanything.yaml
+src/configs/bad_case_pkl_smoke.yaml   # bad_case PKL → MoGe-2 fuse + LA 6-class
 src/integrations/locateanything/       # parser, worker, detect
 requirements-locateanything.txt
 src/batch_scripts/pipeline_loader.py
 src/batch_scripts/run_nuscenes.py
 src/tools/visualize_scene.py
 src/tools/render_summary_video.py      # multi-frame summary → 2 Hz video
+src/tests/test_bev_yaw.py
 docs/LIDAR_INPUT.md
 docs/PY123D_NUSCENES.md
 docs/NUSCENES_EXPERIMENT.md
@@ -50,18 +56,21 @@ requirements-py123d.txt                # optional: pip install -r requirements-p
 env.sh                                 # helper to activate la3d env + CUDA toolchain
 ```
 
-Modified: `src/batch_scripts/depth.py`, `src/batch_scripts/get_crops_enhanced.py`, `src/dataset_model/BaseScene.py`, `PointCloudScene.py`
+Modified: `src/batch_scripts/depth.py`, `src/batch_scripts/get_crops_enhanced.py`, `src/batch_scripts/whole.py`, `src/util_3dbox.py`, `src/model_wrappers.py`, `src/matching/renderer.py`, `src/dataset_model/BaseScene.py`, `PointCloudScene.py`
 
 ### Depth step at a glance
 
 | Mode | When to use | Key command |
 |------|-------------|-------------|
-| `estimate` | Original COCO / in-the-wild (MoGe + DepthPro) | `python batch_scripts/depth.py --split val` |
+| `estimate` | Original / in-the-wild: **MoGe-2** metric depth (default); legacy `moge1_depthpro` optional | `python batch_scripts/depth.py --split val` |
 | `lidar` | You have RGB + world-frame point cloud + calibration | `--depth_source lidar --manifest .../manifest.json` |
 | `py123d` | nuScenes (or other sets) already converted with [py123d](https://github.com/kesai-labs/py123d) | `--depth_source py123d --config configs/py123d_nuscenes.yaml` |
-| `fuse` | nuScenes / LiDAR scenes: metric LiDAR + dense vision fill | `run.depth.source: fuse` in config, or `--depth_source fuse` |
+| `fuse` | nuScenes / LiDAR scenes: metric LiDAR + dense MoGe fill | `run.depth.source: fuse` + `estimator: moge2` |
+| `bad_case_pkl` | data-pipeline-4d bad-case pickle (multi-cam + PCD, no GT) | `--pkl .../bad_case.pkl --config configs/bad_case_pkl_smoke.yaml` |
 
-**Fuse logic** (`src/geometry/lidar_depth.py`): rasterize LiDAR → optional hole fill → MoGe+DepthPro dense estimate → RANSAC / banded scale on overlap → soft-blend LiDAR with aligned vision depth → optional multi-view / edge / calib refine. Toggle flags live under `run.depth.*` in `py123d_nuscenes_fuse.yaml` / `locateanything` configs.
+**Fuse logic** (`src/geometry/lidar_depth.py`): rasterize LiDAR → optional hole fill → **MoGe-2** (or MoGe-3 when available) dense metric estimate → RANSAC / banded scale on overlap → soft-blend LiDAR with vision depth → optional multi-view / edge / calib refine. Toggle flags live under `run.depth.*` in `py123d_nuscenes_fuse.yaml` / `locateanything` configs.
+
+> **MoGe-3 note:** Official code/weights are still marked *coming soon* on [microsoft/MoGe](https://github.com/microsoft/MoGe) (2026-07-21). Set `run.depth.estimator: moge3` / `MOGE_VERSION=v3` once they ship; until then use `moge2` (`Ruicheng/moge-2-vitl-normal`).
 
 All modes write the **same scene layout** (`input.png`, `depth_map.npy`, `cam_params.json`, …) so `enhance.py` → `whole.py` stay compatible.
 
@@ -116,7 +125,23 @@ Preset `locateanything` → `configs/py123d_nuscenes_locateanything.yaml`:
 - `segmentation.holistic: locateanything` — VLM 2D boxes
 - `segmentation.crop_refinement: oneformer` — semantic mask per crop (not full image)
 
-**4. Visualization**
+**4. bad_case PKL smoke (no GT → LocateAnything + MoGe-2 fuse)**
+
+```bash
+source ../env.sh
+cd src
+python batch_scripts/depth.py \
+  --pkl /path/to/xxx_bad_case.pkl \
+  --config configs/bad_case_pkl_smoke.yaml \
+  --save_dir ../experimental_results/bad_case_pkl_smoke/ \
+  --start_index 0 --end_index 1
+# then enhance → crops → completion → elevation → reconstruction → whole
+# (data_backend=bad_case_pkl; detection_source=model; 6 taxonomy classes)
+```
+
+Config `configs/bad_case_pkl_smoke.yaml`: all calibrated cams (`camera_keys: all`), fuse LiDAR PCD with MoGe-2, LocateAnything prompts (`car`/`truck`/…) mapped to internal labels.
+
+**5. Visualization**
 
 ```bash
 python tools/visualize_scene.py \
@@ -127,7 +152,7 @@ python tools/visualize_scene.py \
 
 `compose` builds `viz/summary.png` with **surround cameras arranged around a center BEV** (front / side / back rings). Each camera stacks GT / Pred-2D / depth; BEV uses a meter grid (GT by color, Pred in blue). Prefer `--bev_extent=-50,50,-50,100` (equals form) so argparse does not treat leading `-` as flags.
 
-**5. Summary video (consecutive frames @ 2 Hz)**
+**6. Summary video (consecutive frames @ 2 Hz)**
 
 ```bash
 source ../env.sh
@@ -143,6 +168,12 @@ Renders lightweight per-frame summaries (LiDAR depth + GT crops + depth-fallback
 Pipeline order: `depth` → `enhance` → `crops` → `completion` → `elevation` → `reconstruction` → `whole`. All nuScenes steps use `--data_backend py123d`.
 
 Details: [nuScenes experiment](docs/NUSCENES_EXPERIMENT.md) · [COCO Pipeline](docs/COCO_PIPELINE.md) · [LiDAR](docs/LIDAR_INPUT.md) · [py123d nuScenes](docs/PY123D_NUSCENES.md)
+
+### bad_case PKL smoke visualization
+
+Single-frame bad-case pickle (no GT): **LiDAR PCD + MoGe-2 fuse**, **LocateAnything** 2D (6-class taxonomy), **OneFormer** crop refine, depth/mesh **3D boxes** in surround + BEV. Predicted vehicle sizes clamped with priors after filtering dirty depth points.
+
+![bad_case PKL smoke summary](docs/assets/bad_case_pkl_smoke_summary.png)
 
 ### nuScenes smoke visualization
 
@@ -164,6 +195,11 @@ Older examples: [OneFormer smoke](docs/assets/nuscenes_oneformer_smoke_summary.p
 
 | Area | Summary |
 |------|---------|
+| **bad_case PKL adapter** | `bad_case_pkl_adapter.py` + `depth_source=bad_case_pkl`; open3d PCD; calib→`lidar2cam`; 7 cams incl. narrow |
+| **No-GT pipeline** | `detection_source=model` + LocateAnything + OneFormer; enhance can skip (`use_enhancement: False`) |
+| **Six-class taxonomy** | SED_CAR / LTRUCKS / BUS / PEDESTRIAN / CYCLIST / TRICYCLIST → `vehicle_*` / `person_*` / `non-vehicle_*` |
+| **3D box robustness** | Depth-point filter, vehicle L/W priors, mesh category aliases after rename, TRELLIS untextured GLB fallback |
+| **MoGe-2 default** | Estimate / fuse prefer MoGe-2 metric depth; MoGe-3 hook when weights ship |
 | **Fuse refinements** | Soft blend, banded scale align, median raster+densify, semantic sky/ground priors, multi-view surround refine, edge-aware fill, calib `(du,dv)` |
 | **Depth-fallback 3D** | `whole.py` / `util_3dbox.save_3d_bbox_from_depth_fallback` for unreconned crops beyond `SMOKE_MAX_RECON_OBJECTS` |
 | **Surround summary** | Cameras ringed around BEV; configurable `--bev_extent` / `LA3D_BEV_EXTENT` |

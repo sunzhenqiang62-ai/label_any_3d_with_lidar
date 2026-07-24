@@ -22,6 +22,74 @@ from matching.process_image_space import load_model
 from batch_scripts.pipeline_loader import setup_pipeline_loop
 
 
+# Taxonomy crop stems (e.g. 0_vehicle_sedancar) → legacy TRELLIS asset stems (0_car).
+_MESH_CATEGORY_ALIASES = {
+    "vehicle_sedancar": ["car", "sedan", "sed_car"],
+    "vehicle_truck": ["truck", "ltrucks"],
+    "vehicle_bus": ["bus"],
+    "person_person": ["person", "pedestrian"],
+    "non-vehicle_bicycle": ["bicycle", "cyclist", "bike"],
+    "non_vehicle_bicycle": ["bicycle", "cyclist", "bike"],
+    "non-vehicle_tricycle": ["tricycle", "tricyclist"],
+    "non_vehicle_tricycle": ["tricycle", "tricyclist"],
+}
+
+
+def _resolve_object_space_stem(out_dir: Path, obj_id: str) -> str:
+    """Prefer exact stem; fall back to legacy category aliases for existing .glb."""
+    exact = out_dir / "object_space" / f"{obj_id}.glb"
+    if exact.exists():
+        return obj_id
+    if "_" not in obj_id:
+        return obj_id
+    numeric, category = obj_id.split("_", 1)
+    cat_key = category.strip().lower().replace(" ", "_")
+    for alias in _MESH_CATEGORY_ALIASES.get(cat_key, []):
+        cand = f"{numeric}_{alias}"
+        if (out_dir / "object_space" / f"{cand}.glb").exists():
+            print(f"Using legacy mesh asset {cand}.glb for crop {obj_id}")
+            return cand
+    return obj_id
+
+
+def _ensure_mesh_assets_for_crop(out_dir: Path, obj_id: str, mesh_stem: str) -> str:
+    """
+    Make object_space/{obj_id}.glb (+ elevation dir) available for taxonomy crop ids
+    by linking/copying legacy assets, and ensure crops/{obj_id}_rgba.png exists.
+    Returns the stem to use with process_object (taxonomy obj_id when linked).
+    """
+    import shutil
+
+    obj_space = out_dir / "object_space"
+    crop_dir = out_dir / "crops"
+    # Ensure rgba for taxonomy crop id (amodal may be skipped).
+    rgba = crop_dir / f"{obj_id}_rgba.png"
+    if not rgba.exists():
+        reproj = crop_dir / f"{obj_id}_reproj.png"
+        if reproj.exists():
+            shutil.copy2(reproj, rgba)
+
+    target_glb = obj_space / f"{obj_id}.glb"
+    src_glb = obj_space / f"{mesh_stem}.glb"
+    if not target_glb.exists() and src_glb.exists() and mesh_stem != obj_id:
+        try:
+            target_glb.symlink_to(src_glb.name)
+        except OSError:
+            shutil.copy2(src_glb, target_glb)
+
+    src_elev_dir = obj_space / mesh_stem
+    dst_elev_dir = obj_space / obj_id
+    if src_elev_dir.is_dir() and not dst_elev_dir.exists() and mesh_stem != obj_id:
+        try:
+            dst_elev_dir.symlink_to(src_elev_dir.name)
+        except OSError:
+            shutil.copytree(src_elev_dir, dst_elev_dir)
+
+    if (obj_space / f"{obj_id}.glb").exists():
+        return obj_id
+    return mesh_stem
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
@@ -33,9 +101,9 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", help="save directory", default="../experimental_results/COCO/", type=str)
     parser.add_argument(
         "--data_backend",
-        choices=["coco", "py123d"],
+        choices=["coco", "py123d", "bad_case_pkl"],
         default=None,
-        help="coco: COCONUT; py123d: scene dirs from depth.py --depth_source py123d",
+        help="coco / py123d / bad_case_pkl scene dirs under save_dir/split",
     )
 
     args, extras = parser.parse_known_args()
@@ -92,8 +160,10 @@ if __name__ == "__main__":
             if not full_crop_path.exists():
                 full_crop_path = out_dir / "crops" / f"{obj_id}_reproj.png"
 
-            elevation_path = out_dir / "object_space" / f"{obj_id}" / "estimated_elevation.npy"
-            object_space_path = out_dir / "object_space" / f"{obj_id}.glb"
+            mesh_stem = _resolve_object_space_stem(out_dir, obj_id)
+            align_stem = _ensure_mesh_assets_for_crop(out_dir, obj_id, mesh_stem)
+            elevation_path = out_dir / "object_space" / f"{align_stem}" / "estimated_elevation.npy"
+            object_space_path = out_dir / "object_space" / f"{align_stem}.glb"
             if not os.path.exists(object_space_path):
                 print(f"Object space file {object_space_path} does not exist")
                 continue
@@ -104,9 +174,11 @@ if __name__ == "__main__":
 
             project_root = out_dir
             try:
-                transform = align_to_depth_match(mask, depth_map, obj_id, project_root, mast3r_model)
+                transform = align_to_depth_match(
+                    mask, depth_map, align_stem, project_root, mast3r_model
+                )
             except Exception as e:
-                print(f"Error aligning {obj_id}: {e}")
+                print(f"Error aligning {obj_id} (stem={align_stem}): {e}")
                 continue
             obj_mesh.apply_transform(transform)
             # align_to_depth_match uses PyTorch3D camera coordinates. Convert the

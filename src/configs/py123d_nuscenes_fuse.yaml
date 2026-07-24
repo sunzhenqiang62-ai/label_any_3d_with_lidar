@@ -20,6 +20,10 @@ run:
     source: 'fuse'
     fill: 'none'        # do not pre-fill LiDAR; vision fills holes after fusion
     fuse_align: true
+    # Vision hole-fill: MoGe-2 metric (MoGe-3 not released yet — set estimator: moge3 later)
+    estimator: 'moge2'            # moge2 | moge3 | moge1_depthpro
+    moge_pretrained: 'Ruicheng/moge-2-vitl-normal'
+    moge_resolution_level: 9
     # LiDAR↔vision fusion refinements
     soft_blend: true          # (1) confidence soft blend at LiDAR boundaries
     blend_radius: 3

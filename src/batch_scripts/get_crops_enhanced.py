@@ -46,11 +46,93 @@ def _normalize_label(label):
     return label or "object"
 
 
+# LA / common aliases → project taxonomy (data-pipeline-4d style).
+DEFAULT_LABEL_MAP = {
+    "sed_car": "vehicle_sedancar",
+    "sedan": "vehicle_sedancar",
+    "sedan_car": "vehicle_sedancar",
+    "car": "vehicle_sedancar",
+    "automobile": "vehicle_sedancar",
+    "vehicle_sedancar": "vehicle_sedancar",
+    "ltrucks": "vehicle_truck",
+    "truck": "vehicle_truck",
+    "lorry": "vehicle_truck",
+    "pickup": "vehicle_truck",
+    "vehicle_truck": "vehicle_truck",
+    "bus": "vehicle_bus",
+    "minibus": "vehicle_bus",
+    "vehicle_bus": "vehicle_bus",
+    "pedestrian": "person_person",
+    "person": "person_person",
+    "person_person": "person_person",
+    "cyclist": "non-vehicle_bicycle",
+    "bicycle": "non-vehicle_bicycle",
+    "bike": "non-vehicle_bicycle",
+    "non_vehicle_bicycle": "non-vehicle_bicycle",
+    "non-vehicle_bicycle": "non-vehicle_bicycle",
+    "tricyclist": "non-vehicle_tricycle",
+    "tricycle": "non-vehicle_tricycle",
+    "non_vehicle_tricycle": "non-vehicle_tricycle",
+    "non-vehicle_tricycle": "non-vehicle_tricycle",
+}
+
+
+def _label_map_from_cfg(seg_cfg):
+    raw = _seg_get(seg_cfg, "label_map", None)
+    if raw is None:
+        la_cfg = _seg_get(seg_cfg, "locateanything", {}) or {}
+        if hasattr(la_cfg, "items") and not isinstance(la_cfg, dict):
+            try:
+                from omegaconf import OmegaConf
+
+                la_cfg = OmegaConf.to_container(la_cfg, resolve=True) or {}
+            except Exception:
+                la_cfg = {}
+        if isinstance(la_cfg, dict):
+            raw = la_cfg.get("label_map")
+    mapping = dict(DEFAULT_LABEL_MAP)
+    if raw:
+        if hasattr(raw, "items") and not isinstance(raw, dict):
+            try:
+                from omegaconf import OmegaConf
+
+                raw = OmegaConf.to_container(raw, resolve=True) or {}
+            except Exception:
+                raw = dict(raw)
+        for k, v in dict(raw).items():
+            mapping[_normalize_label(k)] = str(v).strip()
+    return mapping
+
+
+def _map_detection_label(label, label_map=None):
+    key = _normalize_label(label)
+    mapping = label_map or DEFAULT_LABEL_MAP
+    return mapping.get(key, key)
+
+
 def _allowed_categories(seg_cfg):
     allowed = _seg_get(seg_cfg, "allowed_categories", None)
-    if not allowed:
+    if allowed is None:
         return None
-    return {_normalize_label(x) for x in allowed}
+    return {_normalize_label(c) for c in list(allowed)}
+
+
+def _oneformer_hint_from_label(label):
+    """Map taxonomy / LA labels to OneFormer ADE hints."""
+    key = _normalize_label(label)
+    if key in ("vehicle_sedancar", "sedan", "sed_car", "car", "automobile"):
+        return "car"
+    if key in ("vehicle_truck", "ltrucks", "truck", "lorry", "pickup"):
+        return "truck"
+    if key in ("vehicle_bus", "bus", "minibus"):
+        return "bus"
+    if key in ("person_person", "person", "pedestrian"):
+        return "person"
+    if key in ("non-vehicle_bicycle", "non_vehicle_bicycle", "bicycle", "cyclist", "bike"):
+        return "bicycle"
+    if key in ("non-vehicle_tricycle", "non_vehicle_tricycle", "tricycle", "tricyclist"):
+        return "bicycle"  # closest ADE thing class
+    return key
 
 
 _ONEFORMER_CACHE = {}
@@ -115,8 +197,18 @@ def _class_ids_for_label_hint(label_hint, stuff_classes, thing_classes_ids):
         "motorcycle": ("motorcycle", "motorbike", "bike"),
         "bicycle": ("bicycle", "bike", "cycle"),
         "traffic_light": ("traffic", "light", "signal"),
+        # taxonomy aliases
+        "vehicle_sedancar": ("car", "automobile", "jeep", "limousine", "taxi", "ambulance", "minivan"),
+        "vehicle_truck": ("truck", "pickup", "lorry"),
+        "vehicle_bus": ("bus", "minibus"),
+        "person_person": ("person", "man", "woman", "boy", "girl", "pedestrian", "rider"),
+        "non-vehicle_bicycle": ("bicycle", "bike", "cycle"),
+        "non_vehicle_bicycle": ("bicycle", "bike", "cycle"),
+        "non-vehicle_tricycle": ("bicycle", "bike", "cycle"),
+        "non_vehicle_tricycle": ("bicycle", "bike", "cycle"),
     }
-    keys = synonyms.get(hint, (hint,))
+    mapped = _normalize_label(_oneformer_hint_from_label(hint))
+    keys = synonyms.get(mapped, synonyms.get(hint, (mapped,)))
     ids = []
     for tid in thing_classes_ids:
         if tid < 0 or tid >= len(stuff_classes):
@@ -211,7 +303,8 @@ def _locateanything_boxes_then_crop_oneformer(image_pil, image_np, seg_cfg, only
         device=device,
         model_path=la_cfg.get("model_path"),
         generation_mode=la_cfg.get("generation_mode", "hybrid"),
-        allowed_categories=_seg_get(seg_cfg, "allowed_categories", None),
+        # Allow LA raw names; map + filter to taxonomy below.
+        allowed_categories=None,
         min_box_area=int(la_cfg.get("min_mask_area", 1600)),
     )
     from integrations.locateanything.detect import release_worker
@@ -222,16 +315,18 @@ def _locateanything_boxes_then_crop_oneformer(image_pil, image_np, seg_cfg, only
         h, w = image_np.shape[:2]
         return np.zeros((0, h, w), dtype=bool), [], []
 
+    label_map = _label_map_from_cfg(seg_cfg)
     allowed = _allowed_categories(seg_cfg)
     kept_masks, kept_labels, kept_boxes = [], [], []
     h, w = image_np.shape[:2]
 
     for box, label in zip(boxes, labels):
-        label = _normalize_label(label)
-        if allowed is not None and label not in allowed:
+        mapped = _map_detection_label(label, label_map)
+        if allowed is not None and _normalize_label(mapped) not in allowed:
             continue
+        of_hint = _oneformer_hint_from_label(mapped)
         mask = _oneformer_mask_in_box(
-            image_pil, box, label, device,
+            image_pil, box, of_hint, device,
             pad_ratio=pad_ratio,
             min_component_area=min_component,
         )
@@ -241,9 +336,9 @@ def _locateanything_boxes_then_crop_oneformer(image_pil, image_np, seg_cfg, only
             mask[max(0, y1):min(h, y2), max(0, x1):min(w, x2)] = True
             if mask.sum() < min_component:
                 continue
-            print(f"OneFormer mask empty for {label}; using box fallback.")
+            print(f"OneFormer mask empty for {mapped}; using box fallback.")
         kept_masks.append(mask)
-        kept_labels.append(label)
+        kept_labels.append(mapped)
         kept_boxes.append(box)
 
     if not kept_masks:
@@ -326,9 +421,29 @@ def _model_segment_image(image_pil, image_np, seg_cfg, only_foreground=True):
             device=device,
             model_path=la_cfg.get("model_path"),
             generation_mode=la_cfg.get("generation_mode", "hybrid"),
-            allowed_categories=_seg_get(seg_cfg, "allowed_categories", None),
+            allowed_categories=None,
             min_mask_area=int(la_cfg.get("min_mask_area", 1600)),
         )
+        label_map = _label_map_from_cfg(seg_cfg)
+        allowed = _allowed_categories(seg_cfg)
+        if labels:
+            mapped_labels = []
+            keep_idx = []
+            for i, lab in enumerate(labels):
+                mapped = _map_detection_label(lab, label_map)
+                if allowed is not None and _normalize_label(mapped) not in allowed:
+                    continue
+                mapped_labels.append(mapped)
+                keep_idx.append(i)
+            if keep_idx:
+                masks = np.asarray(masks)[keep_idx]
+                labels = mapped_labels
+                _boxes = [_boxes[i] for i in keep_idx] if _boxes else _boxes
+            else:
+                h, w = image_np.shape[:2]
+                masks = np.zeros((0, h, w), dtype=bool)
+                labels = []
+                _boxes = []
     else:
         raise ValueError(
             f"Unsupported segmentation.holistic='{holistic}'. "
@@ -389,6 +504,9 @@ def _resolve_detection_source(opt, data_backend):
     source = _run_get(opt.run, "detection_source", None)
     if source is not None:
         return source
+    # bad_case dumps usually have empty ann_infos → must use model detection.
+    if data_backend == "bad_case_pkl":
+        return "model"
     if data_backend == "py123d":
         return "gt"
     return "gt"
@@ -405,9 +523,9 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", help="save directory", default="../experimental_results/COCO/", type=str)
     parser.add_argument(
         "--data_backend",
-        choices=["coco", "py123d"],
+        choices=["coco", "py123d", "bad_case_pkl"],
         default=None,
-        help="coco: COCONUT annotations; py123d: scene dirs from depth.py --depth_source py123d",
+        help="coco / py123d / bad_case_pkl scene dirs under save_dir/split",
     )
 
     args, extras = parser.parse_known_args()

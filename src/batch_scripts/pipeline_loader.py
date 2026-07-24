@@ -54,6 +54,15 @@ def resolve_py123d_split(split: str, opt) -> str:
 def resolve_split(args, opt, data_backend: str) -> str:
     if data_backend == "py123d":
         return resolve_py123d_split(args.split, opt)
+    if data_backend == "bad_case_pkl":
+        bad_cfg = _run_cfg(opt, "bad_case", {}) or {}
+        if isinstance(bad_cfg, dict):
+            cfg_split = bad_cfg.get("split")
+        else:
+            cfg_split = getattr(bad_cfg, "split", None)
+        if args.split not in ("val", "train", "test"):
+            return args.split
+        return str(cfg_split or "bad_case")
     return args.split
 
 
@@ -71,7 +80,8 @@ def build_loader(
     require_files: Optional[Tuple[str, ...]] = None,
     require_annotations: bool = False,
 ):
-    if data_backend == "py123d":
+    # bad_case_pkl depth writes the same per-camera layout as py123d.
+    if data_backend in ("py123d", "bad_case_pkl"):
         req = require_files or ("input.png",)
         return Py123dOutputLoader(
             save_dir,

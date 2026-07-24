@@ -1,0 +1,90 @@
+# Smoke: data-pipeline-4d bad_case pickle → MoGe-2 fuse + LocateAnything 2D
+# (no GT boxes / ann_infos; detection_source=model)
+# Detect all cameras (incl. cam0 narrow) with 6 taxonomy classes.
+scene:
+  type: 'InTheWild'
+  attributes:
+    img_path: ''
+  annotations_path: ''
+  save_dir: '../experimental_results/bad_case_pkl_smoke/'
+  K: []
+run:
+  data_backend: 'bad_case_pkl'
+  pkl_path: '/mnt/cfs-baidu/public/chengyue.sun/data-pipeline-4d/bad_case_vis_2076943584560115712/0397f34ab3f34e40ac2ba9fcd656226c_1735663173394_pm10_pp10_bad_case.pkl'
+  use_enhancement: False
+  only_foreground: False
+  detection_source: 'model'
+  single_object: False
+  reproject: False
+  depth_edge_threshold: 0.0001
+  amodal_completion: null
+  obj_rec: 'trellis'
+  depth:
+    source: 'bad_case_pkl'
+    fill: 'none'
+    fuse_align: true
+    estimator: 'moge2'
+    moge_pretrained: '/mnt/cfs-baidu/public/chengyue.sun/workspace/LabelAny3d/external/checkpoints/moge-2-vitb-normal.pt'
+    moge_resolution_level: 9
+    soft_blend: true
+    blend_radius: 3
+    banded_align: true
+    raster_mode: 'median'
+    densify_radius: 1
+    semantic_guide: true
+    multiview_refine: true
+    edge_fill: true
+    calib_refine: true
+    calib_max_shift: 2
+  bad_case:
+    camera_keys: 'all'   # cam0..cam8 all calibrated views
+    frame_index: null    # null → middle frame
+    split: 'bad_case'
+  segmentation:
+    holistic: 'locateanything'
+    crop_refinement: 'oneformer'
+    crop_refinement_pad: 0.15
+    crop_refinement_min_area: 400
+    fg_bg: 'gt'
+    tagger: 'null'
+    # Taxonomy labels after LA → label_map
+    allowed_categories:
+      - vehicle_sedancar
+      - vehicle_truck
+      - vehicle_bus
+      - person_person
+      - non-vehicle_bicycle
+      - non-vehicle_tricycle
+    label_map:
+      SED_CAR: vehicle_sedancar
+      LTRUCKS: vehicle_truck
+      BUS: vehicle_bus
+      PEDESTRIAN: person_person
+      CYCLIST: non-vehicle_bicycle
+      TRICYCLIST: non-vehicle_tricycle
+      sedan: vehicle_sedancar
+      car: vehicle_sedancar
+      truck: vehicle_truck
+      bus: vehicle_bus
+      pedestrian: person_person
+      person: person_person
+      bicycle: non-vehicle_bicycle
+      cyclist: non-vehicle_bicycle
+      tricycle: non-vehicle_tricycle
+      tricyclist: non-vehicle_tricycle
+    locateanything:
+      model_path: 'nvidia/LocateAnything-3B'
+      generation_mode: 'hybrid'
+      # Prompt classes for LocateAnything (natural language; mapped via label_map)
+      categories:
+        - car
+        - truck
+        - bus
+        - person
+        - bicycle
+        - tricycle
+      min_mask_area: 1600
+  calibration:
+    intrinsics: 'gt'
+    pose: 'gt'
+  clip_bg: False

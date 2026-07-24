@@ -17,9 +17,13 @@ run:
   amodal_completion: null  # smoke: skip InstructPix2Pix; use 'our' for full quality
   obj_rec: 'trellis'
   depth:
-    source: 'fuse'       # LiDAR prior + MoGe/DepthPro fill in holes
+    source: 'fuse'       # LiDAR prior + MoGe-2 metric fill in holes
     fill: 'none'         # do not pre-fill LiDAR; vision fills after fusion
     fuse_align: true
+    estimator: 'moge2'   # moge2 (default) | moge3 (when released) | moge1_depthpro
+    # Prefer local ckpt when present; override via MOGE_PRETRAINED / run.depth.moge_pretrained
+    moge_pretrained: '/mnt/cfs-baidu/public/chengyue.sun/workspace/LabelAny3d/external/checkpoints/moge-2-vitb-normal.pt'
+    moge_resolution_level: 9
     soft_blend: true
     blend_radius: 3
     banded_align: true
@@ -31,12 +35,12 @@ run:
     calib_refine: true
     calib_max_shift: 2
   py123d:
-    dataset: 'nuscenes'
+    dataset: 'nuscenes-mini'
     split_type: 'val'
     camera_keys: 'all'
     lidar_key: 'merged'
     frame_index: null
-    max_scenes: 5
+    max_scenes: 1
   segmentation:
     holistic: 'locateanything'
     # Run OneFormer only inside each LocateAnything 2D box crop (not on full image).

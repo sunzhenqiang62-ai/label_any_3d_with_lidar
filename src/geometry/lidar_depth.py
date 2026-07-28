@@ -403,6 +403,104 @@ def fill_depth_holes(depth, valid_mask, method="nearest"):
     return filled, new_mask
 
 
+def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    """Weighted median of 1D positive values."""
+    values = np.asarray(values, dtype=np.float64).ravel()
+    weights = np.asarray(weights, dtype=np.float64).ravel()
+    ok = np.isfinite(values) & np.isfinite(weights) & (weights > 0)
+    if not ok.any():
+        return float("nan")
+    values = values[ok]
+    weights = weights[ok]
+    order = np.argsort(values)
+    values = values[order]
+    weights = weights[order]
+    cum = np.cumsum(weights)
+    cutoff = 0.5 * cum[-1]
+    return float(values[int(np.searchsorted(cum, cutoff))])
+
+
+def robust_scale_ratio(
+    lidar_z: np.ndarray,
+    estimate_z: np.ndarray,
+    weights: Optional[np.ndarray] = None,
+    *,
+    ransac_iters: int = 64,
+    inlier_rel_thresh: float = 0.12,
+    min_inliers: int = 16,
+    seed: int = 0,
+) -> float:
+    """
+    Estimate positive scale s ≈ lidar / estimate with confidence-weighted RANSAC,
+    then refine with a weighted median on inliers.
+    """
+    lidar_z = np.asarray(lidar_z, dtype=np.float64).ravel()
+    estimate_z = np.asarray(estimate_z, dtype=np.float64).ravel()
+    n = lidar_z.size
+    if n == 0:
+        return 1.0
+    if weights is None:
+        weights = np.ones(n, dtype=np.float64)
+    else:
+        weights = np.asarray(weights, dtype=np.float64).ravel()
+        if weights.size != n:
+            weights = np.ones(n, dtype=np.float64)
+    ok = (
+        np.isfinite(lidar_z)
+        & np.isfinite(estimate_z)
+        & np.isfinite(weights)
+        & (lidar_z > 1e-6)
+        & (estimate_z > 1e-6)
+        & (weights > 0)
+    )
+    if ok.sum() < 3:
+        if ok.any():
+            return float(np.clip(np.median(lidar_z[ok] / estimate_z[ok]), 0.05, 20.0))
+        return 1.0
+
+    lidar_z = lidar_z[ok]
+    estimate_z = estimate_z[ok]
+    weights = weights[ok]
+    ratios = lidar_z / estimate_z
+    # Soft floor so sparse low-conf pixels still have a chance to be sampled.
+    probs = np.maximum(weights, 1e-3)
+    probs = probs / probs.sum()
+
+    rng = np.random.default_rng(seed)
+    best_score = -1.0
+    best_inliers = None
+    n_pts = ratios.size
+    n_iters = int(max(8, min(ransac_iters, n_pts * 4)))
+
+    for _ in range(n_iters):
+        idx = int(rng.choice(n_pts, p=probs))
+        s = float(ratios[idx])
+        if not np.isfinite(s) or s <= 0:
+            continue
+        resid = np.abs(s * estimate_z - lidar_z) / np.maximum(lidar_z, 1e-6)
+        inliers = resid <= float(inlier_rel_thresh)
+        n_inl = int(inliers.sum())
+        if n_inl < max(3, min_inliers // 4):
+            continue
+        # Prefer more inliers and higher-confidence inliers.
+        score = float(weights[inliers].sum()) + 0.05 * n_inl
+        if score > best_score:
+            best_score = score
+            best_inliers = inliers
+
+    if best_inliers is None or int(best_inliers.sum()) < min_inliers:
+        # Fallback: confidence-weighted median of all ratios.
+        s = _weighted_median(ratios, weights)
+        if not np.isfinite(s) or s <= 0:
+            s = float(np.median(ratios))
+        return float(np.clip(s, 0.05, 20.0))
+
+    s = _weighted_median(ratios[best_inliers], weights[best_inliers])
+    if not np.isfinite(s) or s <= 0:
+        s = float(np.median(ratios[best_inliers]))
+    return float(np.clip(s, 0.05, 20.0))
+
+
 def align_depth_banded(
     estimate: np.ndarray,
     lidar: np.ndarray,
@@ -415,11 +513,15 @@ def align_depth_banded(
         (80.0, 200.0),
     ),
     min_points: int = 40,
+    weights: Optional[np.ndarray] = None,
+    ransac_iters: int = 64,
+    inlier_rel_thresh: float = 0.12,
 ) -> np.ndarray:
     """
-    Fit an independent positive scale per distance band on LiDAR overlap,
-    then apply scales to vision depth (band assignment by estimate depth).
-    Falls back to global median scale when a band is too sparse.
+    Fit an independent positive scale per distance band on LiDAR overlap
+    via confidence-weighted RANSAC + weighted-median refine, then apply
+    scales to vision depth (band assignment by globally-aligned estimate).
+    Falls back to a global robust scale when a band is too sparse.
     """
     estimate = np.asarray(estimate, dtype=np.float32)
     lidar = np.asarray(lidar, dtype=np.float32)
@@ -437,18 +539,48 @@ def align_depth_banded(
     apply_mask = np.asarray(apply_mask, dtype=bool)
 
     out = np.full_like(estimate, 10000.0)
-    if fit.sum() < min_points:
+    if fit.sum() < max(8, min_points // 2):
         return estimate.copy()
 
-    global_scale = float(np.median(lidar[fit] / estimate[fit]))
-    global_scale = float(np.clip(global_scale, 0.05, 20.0))
+    if weights is None:
+        w_fit = np.ones(int(fit.sum()), dtype=np.float64)
+        w_map = None
+    else:
+        w_map = np.asarray(weights, dtype=np.float32)
+        if w_map.shape != estimate.shape:
+            w_map = None
+            w_fit = np.ones(int(fit.sum()), dtype=np.float64)
+        else:
+            w_fit = np.maximum(w_map[fit].astype(np.float64), 1e-3)
+
+    global_scale = robust_scale_ratio(
+        lidar[fit],
+        estimate[fit],
+        w_fit,
+        ransac_iters=ransac_iters,
+        inlier_rel_thresh=inlier_rel_thresh,
+        min_inliers=max(16, min_points // 2),
+        seed=0,
+    )
 
     band_scales: List[Tuple[float, float, float]] = []
-    for z0, z1 in bands:
+    for bi, (z0, z1) in enumerate(bands):
         band = fit & (lidar >= z0) & (lidar < z1)
-        if band.sum() >= min_points:
-            s = float(np.median(lidar[band] / estimate[band]))
-            s = float(np.clip(s, 0.05, 20.0))
+        n_band = int(band.sum())
+        if n_band >= min_points:
+            if w_map is None:
+                w_band = np.ones(n_band, dtype=np.float64)
+            else:
+                w_band = np.maximum(w_map[band].astype(np.float64), 1e-3)
+            s = robust_scale_ratio(
+                lidar[band],
+                estimate[band],
+                w_band,
+                ransac_iters=ransac_iters,
+                inlier_rel_thresh=inlier_rel_thresh,
+                min_inliers=max(12, min_points // 3),
+                seed=bi + 1,
+            )
         else:
             s = global_scale
         band_scales.append((z0, z1, s))
@@ -585,8 +717,8 @@ def fuse_lidar_with_estimate(
     edge_fill: bool = True,
 ):
     """
-    LiDAR-constrained depth with soft blend, banded scale, semantic weights,
-    and edge-aware vision fill.
+    LiDAR-constrained depth with soft blend, robust banded scale
+    (confidence-weighted RANSAC), semantic weights, and edge-aware vision fill.
     """
     lidar = np.asarray(lidar_depth, dtype=np.float32)
     estimate = np.asarray(estimate_depth, dtype=np.float32)
@@ -599,11 +731,16 @@ def fuse_lidar_with_estimate(
 
     estimate_finite = np.isfinite(estimate) & (estimate > 1e-6) & (estimate < np.inf)
     fused = estimate.copy()
+    conf = lidar_confidence_map(valid, count=hit_count, blend_radius=blend_radius)
 
     if align and valid.sum() > 50:
         if banded_align and align_fn is None:
             fused = align_depth_banded(
-                estimate, lidar, mask=valid, apply_mask=estimate_finite
+                estimate,
+                lidar,
+                mask=valid,
+                apply_mask=estimate_finite,
+                weights=conf,
             )
         elif align_fn is not None:
             fused = align_fn(
@@ -614,7 +751,11 @@ def fuse_lidar_with_estimate(
             ).astype(np.float32)
         else:
             fused = align_depth_banded(
-                estimate, lidar, mask=valid, apply_mask=estimate_finite
+                estimate,
+                lidar,
+                mask=valid,
+                apply_mask=estimate_finite,
+                weights=conf,
             )
 
     # Edge-aware fill for remaining invalid vision pixels using aligned seeds.
@@ -626,8 +767,6 @@ def fuse_lidar_with_estimate(
             image_np=image_np,
             max_radius=32,
         )
-
-    conf = lidar_confidence_map(valid, count=hit_count, blend_radius=blend_radius)
 
     if semantic_guide and image_np is not None:
         priors = estimate_semantic_priors(image_np)
@@ -652,7 +791,9 @@ def fuse_lidar_with_estimate(
         vision = np.where(np.isfinite(fused) & (fused < 5000), fused, estimate)
         vision = np.where(np.isfinite(vision) & (vision > 1e-6), vision, lidar)
         lidar_safe = np.where(valid, lidar, vision)
-        mixed = alpha * lidar_safe + (1.0 - alpha) * vision
+        with np.errstate(invalid="ignore"):
+            mixed = alpha * lidar_safe + (1.0 - alpha) * vision
+        mixed = np.where(np.isfinite(mixed), mixed, vision)
         # Outside LiDAR support keep vision (with tiny exterior skirt already in conf).
         fused = np.where(valid | (conf > 0.05), mixed, vision).astype(np.float32)
         # Ensure pure LiDAR at highest-confidence hits.
@@ -740,11 +881,14 @@ def multiview_consistency_refine(
         warped, wvalid = warp_depth_camera_to_camera(
             nd, nK, nc2w, K, c2w, H, W
         )
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rel = np.abs(warped - depth) / np.maximum(depth, 1e-3)
         agree = (
             base_valid
             & wvalid
             & np.isfinite(warped)
-            & (np.abs(warped - depth) / np.maximum(depth, 1e-3) < 0.12)
+            & np.isfinite(rel)
+            & (rel < 0.12)
         )
         if agree.sum() < 100:
             continue

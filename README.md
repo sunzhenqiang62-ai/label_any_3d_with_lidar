@@ -9,8 +9,9 @@ Based on [UVA LabelAny3D](https://github.com/UVA-Computer-Vision-Lab/LabelAny3D)
 |--------|----------------|
 | **Five depth backends** | `estimate` \| `lidar` \| `py123d` \| **`fuse`** \| **`bad_case_pkl`** — same downstream layout |
 | **Fuse depth** | Keep projected LiDAR where valid; fill holes with **MoGe-2** metric depth (`estimator: moge2`; MoGe-3 when released) |
-| **Fuse refinements (1–7)** | Soft blend, banded scale, median raster+densify, semantic priors, multi-view refine, edge fill, calib `(du,dv)` |
+| **Fuse refinements (1–7)** | Soft blend, **conf-weighted RANSAC + distance-band** scale, median raster+densify, semantic priors, multi-view refine, edge fill, calib `(du,dv)` |
 | **bad_case PKL** | data-pipeline-4d pickle → multi-cam RGB + LiDAR PCD + calib; fuse with MoGe-2; no GT → LocateAnything 2D |
+| **360° surround detect** | `camera_keys: surround` (6 cams, no NARROW); LA **short `category_passes`** merge to keep person/vehicle recall |
 | **Six-class taxonomy** | `SED_CAR` / `LTRUCKS` / `BUS` / `PEDESTRIAN` / `CYCLIST` / `TRICYCLIST` → internal labels via `label_map` |
 | **Custom LiDAR** | Manifest + calib JSON → `depth_map.npy`, PLY, `cam_params.json` ([guide](docs/LIDAR_INPUT.md)) |
 | **py123d + nuScenes** | Arrow logs → depth + projected 3D-box masks (`nuscenes_annotations.json`) for crops ([guide](docs/PY123D_NUSCENES.md)) |
@@ -39,8 +40,9 @@ src/configs/py123d_nuscenes.yaml
 src/configs/py123d_nuscenes_smoke.yaml
 src/configs/py123d_nuscenes_fuse.yaml
 src/configs/py123d_nuscenes_locateanything.yaml
-src/configs/bad_case_pkl_smoke.yaml   # bad_case PKL → MoGe-2 fuse + LA 6-class
+src/configs/bad_case_pkl_smoke.yaml   # bad_case PKL → MoGe-2 fuse + LA surround multipass
 src/integrations/locateanything/       # parser, worker, detect
+external/MoGe/infer_moge.py            # MoGe-2/3 inference wrapper (force-tracked)
 requirements-locateanything.txt
 src/batch_scripts/pipeline_loader.py
 src/batch_scripts/run_nuscenes.py
@@ -68,7 +70,7 @@ Modified: `src/batch_scripts/depth.py`, `src/batch_scripts/get_crops_enhanced.py
 | `fuse` | nuScenes / LiDAR scenes: metric LiDAR + dense MoGe fill | `run.depth.source: fuse` + `estimator: moge2` |
 | `bad_case_pkl` | data-pipeline-4d bad-case pickle (multi-cam + PCD, no GT) | `--pkl .../bad_case.pkl --config configs/bad_case_pkl_smoke.yaml` |
 
-**Fuse logic** (`src/geometry/lidar_depth.py`): rasterize LiDAR → optional hole fill → **MoGe-2** (or MoGe-3 when available) dense metric estimate → RANSAC / banded scale on overlap → soft-blend LiDAR with vision depth → optional multi-view / edge / calib refine. Toggle flags live under `run.depth.*` in `py123d_nuscenes_fuse.yaml` / `locateanything` configs.
+**Fuse logic** (`src/geometry/lidar_depth.py`): rasterize LiDAR → optional hole fill → **MoGe-2** (or MoGe-3 when available) dense metric estimate → **confidence-weighted RANSAC** + per-distance-band scale on overlap (weighted-median refine) → soft-blend LiDAR with vision depth → optional multi-view / edge / calib refine. Toggle flags live under `run.depth.*` in `py123d_nuscenes_fuse.yaml` / `locateanything` / `bad_case_pkl_smoke` configs.
 
 > **MoGe-3 note:** Official code/weights are still marked *coming soon* on [microsoft/MoGe](https://github.com/microsoft/MoGe) (2026-07-21). Set `run.depth.estimator: moge3` / `MOGE_VERSION=v3` once they ship; until then use `moge2` (`Ruicheng/moge-2-vitl-normal`).
 
@@ -139,7 +141,7 @@ python batch_scripts/depth.py \
 # (data_backend=bad_case_pkl; detection_source=model; 6 taxonomy classes)
 ```
 
-Config `configs/bad_case_pkl_smoke.yaml`: all calibrated cams (`camera_keys: all`), fuse LiDAR PCD with MoGe-2, LocateAnything prompts (`car`/`truck`/…) mapped to internal labels.
+Config `configs/bad_case_pkl_smoke.yaml`: **360° surround** (`camera_keys: surround`, 6 cams, no NARROW), fuse LiDAR PCD with MoGe-2, LocateAnything via short **`category_passes`** (`[car,person]` → `[truck,bus]` → `[bicycle,motorcycle]`) merged with NMS (long single prompts can empty some views), mapped to the 6-class taxonomy. Lower `min_mask_area` / `min_crop_mask_area` (400) to keep distant person/vehicle crops.
 
 **5. Visualization**
 
@@ -171,7 +173,7 @@ Details: [nuScenes experiment](docs/NUSCENES_EXPERIMENT.md) · [COCO Pipeline](d
 
 ### bad_case PKL smoke visualization
 
-Single-frame bad-case pickle (no GT): **LiDAR PCD + MoGe-2 fuse**, **LocateAnything** 2D (6-class taxonomy), **OneFormer** crop refine, depth/mesh **3D boxes** in surround + BEV. Predicted vehicle sizes clamped with priors after filtering dirty depth points.
+Single-frame bad-case pickle (no GT): **LiDAR PCD + MoGe-2 fuse** (conf-weighted RANSAC banded scale), **LocateAnything** 2D on **6 surround cams** (person + vehicle via multipass prompts), **OneFormer** crop refine, depth/mesh **3D boxes** in surround + BEV. Example below: 23 detections (18 vehicle / 5 person) after opening filters.
 
 ![bad_case PKL smoke summary](docs/assets/bad_case_pkl_smoke_summary.png)
 
@@ -195,12 +197,14 @@ Older examples: [OneFormer smoke](docs/assets/nuscenes_oneformer_smoke_summary.p
 
 | Area | Summary |
 |------|---------|
-| **bad_case PKL adapter** | `bad_case_pkl_adapter.py` + `depth_source=bad_case_pkl`; open3d PCD; calib→`lidar2cam`; 7 cams incl. narrow |
+| **360° LA detect (2026-07-28)** | `camera_keys: surround`; `category_passes` multipass + NMS in `get_crops_enhanced.py`; keep small crops (`min_*_area: 400`); bad_case smoke → 23 person/vehicle boxes |
+| **Robust MoGe↔LiDAR scale** | `robust_scale_ratio()` + conf-weighted RANSAC / banded align in `lidar_depth.py`; fuse passes `lidar_confidence_map` into align |
+| **bad_case PKL adapter** | `bad_case_pkl_adapter.py` + `depth_source=bad_case_pkl`; open3d PCD; calib→`lidar2cam`; surround or all cams |
 | **No-GT pipeline** | `detection_source=model` + LocateAnything + OneFormer; enhance can skip (`use_enhancement: False`) |
 | **Six-class taxonomy** | SED_CAR / LTRUCKS / BUS / PEDESTRIAN / CYCLIST / TRICYCLIST → `vehicle_*` / `person_*` / `non-vehicle_*` |
 | **3D box robustness** | Depth-point filter, vehicle L/W priors, mesh category aliases after rename, TRELLIS untextured GLB fallback |
 | **MoGe-2 default** | Estimate / fuse prefer MoGe-2 metric depth; MoGe-3 hook when weights ship |
-| **Fuse refinements** | Soft blend, banded scale align, median raster+densify, semantic sky/ground priors, multi-view surround refine, edge-aware fill, calib `(du,dv)` |
+| **Fuse refinements** | Soft blend, banded+RANSAC scale align, median raster+densify, semantic sky/ground priors, multi-view surround refine, edge-aware fill, calib `(du,dv)` |
 | **Depth-fallback 3D** | `whole.py` / `util_3dbox.save_3d_bbox_from_depth_fallback` for unreconned crops beyond `SMOKE_MAX_RECON_OBJECTS` |
 | **Surround summary** | Cameras ringed around BEV; configurable `--bev_extent` / `LA3D_BEV_EXTENT` |
 | **Summary video** | `tools/render_summary_video.py` — consecutive frames → 2 Hz MP4 |

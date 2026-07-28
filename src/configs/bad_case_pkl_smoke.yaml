@@ -1,6 +1,6 @@
 # Smoke: data-pipeline-4d bad_case pickle → MoGe-2 fuse + LocateAnything 2D
 # (no GT boxes / ann_infos; detection_source=model)
-# Detect all cameras (incl. cam0 narrow) with 6 taxonomy classes.
+# 360° surround: detect all pedestrians + vehicles (6-class taxonomy + motorcycle).
 scene:
   type: 'InTheWild'
   attributes:
@@ -28,7 +28,7 @@ run:
     moge_resolution_level: 9
     soft_blend: true
     blend_radius: 3
-    banded_align: true
+    banded_align: true        # conf-weighted RANSAC + per-distance-band scale
     raster_mode: 'median'
     densify_radius: 1
     semantic_guide: true
@@ -37,17 +37,19 @@ run:
     calib_refine: true
     calib_max_shift: 2
   bad_case:
-    camera_keys: 'all'   # cam0..cam8 all calibrated views
+    camera_keys: 'surround'   # 360°: 6 surround cams (no NARROW)
     frame_index: null    # null → middle frame
     split: 'bad_case'
   segmentation:
     holistic: 'locateanything'
     crop_refinement: 'oneformer'
     crop_refinement_pad: 0.15
-    crop_refinement_min_area: 400
+    crop_refinement_min_area: 200
+    # Keep small distant person/vehicle crops (was effectively blocked by 6400px).
+    min_crop_mask_area: 400
     fg_bg: 'gt'
     tagger: 'null'
-    # Taxonomy labels after LA → label_map
+    # Taxonomy labels after LA → label_map (all pedestrian + vehicle classes)
     allowed_categories:
       - vehicle_sedancar
       - vehicle_truck
@@ -64,26 +66,31 @@ run:
       TRICYCLIST: non-vehicle_tricycle
       sedan: vehicle_sedancar
       car: vehicle_sedancar
+      van: vehicle_sedancar
+      suv: vehicle_sedancar
+      taxi: vehicle_sedancar
       truck: vehicle_truck
+      pickup: vehicle_truck
       bus: vehicle_bus
       pedestrian: person_person
       person: person_person
       bicycle: non-vehicle_bicycle
       cyclist: non-vehicle_bicycle
+      motorcycle: non-vehicle_bicycle
+      motorbike: non-vehicle_bicycle
       tricycle: non-vehicle_tricycle
       tricyclist: non-vehicle_tricycle
     locateanything:
       model_path: 'nvidia/LocateAnything-3B'
       generation_mode: 'hybrid'
-      # Prompt classes for LocateAnything (natural language; mapped via label_map)
-      categories:
-        - car
-        - truck
-        - bus
-        - person
-        - bicycle
-        - tricycle
-      min_mask_area: 1600
+      # Long single prompts can empty some views; run short passes and merge.
+      categories: null
+      category_passes:
+        - [car, person]
+        - [truck, bus]
+        - [bicycle, motorcycle]
+      # Lower than 1600 so far-away person/vehicle boxes are kept
+      min_mask_area: 400
   calibration:
     intrinsics: 'gt'
     pose: 'gt'

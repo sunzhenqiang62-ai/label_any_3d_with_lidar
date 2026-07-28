@@ -163,6 +163,23 @@ def test_fuse_lidar_estimate_with_align():
     print("fuse_lidar_estimate_with_align: OK")
 
 
+def test_robust_scale_ratio_rejects_outliers():
+    from geometry.lidar_depth import robust_scale_ratio
+
+    rng = np.random.default_rng(0)
+    est = rng.uniform(5.0, 40.0, size=400).astype(np.float64)
+    true_s = 1.7
+    lidar = est * true_s
+    # Inject gross outliers that would bias a plain median.
+    lidar[:40] *= 8.0
+    weights = np.ones(400, dtype=np.float64)
+    weights[:40] = 0.05
+    weights[40:] = 1.0
+    s = robust_scale_ratio(lidar, est, weights, ransac_iters=80, inlier_rel_thresh=0.1)
+    assert abs(s - true_s) < 0.08, (s, true_s)
+    print("robust_scale_ratio: OK")
+
+
 def test_fuse_optimized_pipeline():
     """Exercise soft blend + banded align + semantic + edge fill on synthetic data."""
     from geometry.lidar_depth import align_depth_banded, lidar_confidence_map
@@ -182,9 +199,16 @@ def test_fuse_optimized_pipeline():
         calib_max_shift=1,
     )
     estimate = np.full((H, W), 2.5, dtype=np.float32)
+    # Contaminate a few overlap pixels so plain median would drift; RANSAC should hold.
+    lidar = computed["depth_map"].copy()
+    valid = computed["valid_mask"].copy()
+    ys, xs = np.where(valid)
+    if ys.size > 20:
+        lidar[ys[:15], xs[:15]] *= 6.0
+    conf = lidar_confidence_map(valid, computed.get("hit_count"))
     fused, fused_valid = fuse_lidar_with_estimate(
-        computed["depth_map"],
-        computed["valid_mask"],
+        lidar,
+        valid,
         estimate,
         align=True,
         image_np=img,
@@ -194,16 +218,20 @@ def test_fuse_optimized_pipeline():
         semantic_guide=True,
         edge_fill=True,
     )
-    core = binary_erosion(computed["valid_mask"], iterations=2)
+    core = binary_erosion(valid, iterations=2)
     if core.any():
-        assert np.allclose(fused[core], 5.0, atol=0.15), fused[core].mean()
-    assert fused_valid.sum() > computed["valid_mask"].sum()
-    conf = lidar_confidence_map(computed["valid_mask"], computed.get("hit_count"))
+        assert np.allclose(fused[core], 5.0, atol=0.25), fused[core].mean()
+    assert fused_valid.sum() > valid.sum()
     assert conf.max() > 0.5
     banded = align_depth_banded(
-        estimate, computed["depth_map"], computed["valid_mask"], apply_mask=np.ones_like(estimate, dtype=bool)
+        estimate,
+        lidar,
+        valid,
+        apply_mask=np.ones_like(estimate, dtype=bool),
+        weights=conf,
     )
-    assert np.median(banded[computed["valid_mask"]]) == np.median(banded[computed["valid_mask"]])
+    # After robust align, vision depth on LiDAR support should sit near true 5m.
+    assert abs(float(np.median(banded[valid])) - 5.0) < 0.35
     print("fuse_optimized_pipeline: OK")
 
 
@@ -224,6 +252,7 @@ if __name__ == "__main__":
     test_build_outputs()
     test_fuse_lidar_estimate()
     test_fuse_lidar_estimate_with_align()
+    test_robust_scale_ratio_rejects_outliers()
     test_fuse_optimized_pipeline()
     test_manifest_loader_integration()
     print("All LiDAR depth smoke tests passed.")

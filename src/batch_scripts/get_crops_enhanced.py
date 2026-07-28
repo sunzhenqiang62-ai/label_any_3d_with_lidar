@@ -70,6 +70,11 @@ DEFAULT_LABEL_MAP = {
     "bike": "non-vehicle_bicycle",
     "non_vehicle_bicycle": "non-vehicle_bicycle",
     "non-vehicle_bicycle": "non-vehicle_bicycle",
+    "motorcycle": "non-vehicle_bicycle",
+    "motorbike": "non-vehicle_bicycle",
+    "van": "vehicle_sedancar",
+    "suv": "vehicle_sedancar",
+    "taxi": "vehicle_sedancar",
     "tricyclist": "non-vehicle_tricycle",
     "tricycle": "non-vehicle_tricycle",
     "non_vehicle_tricycle": "non-vehicle_tricycle",
@@ -280,9 +285,56 @@ def _oneformer_mask_in_box(image_pil, box_xyxy, label_hint, device, pad_ratio=0.
     return full
 
 
-def _locateanything_boxes_then_crop_oneformer(image_pil, image_np, seg_cfg, only_foreground=True):
-    from integrations.locateanything.detect import detect_boxes
+def _la_category_passes(la_cfg):
+    """Short prompt groups; long single lists can empty detections on some views."""
+    passes = la_cfg.get("category_passes")
+    if passes:
+        out = []
+        for p in list(passes):
+            cats = [str(c) for c in list(p)]
+            if cats:
+                out.append(cats)
+        if out:
+            return out
+    categories = la_cfg.get("categories")
+    if categories is not None:
+        return [list(categories)]
+    return [None]
 
+
+def _detect_boxes_multipass(image_pil, la_cfg, device):
+    """Run LocateAnything once per short category pass and NMS-merge."""
+    from integrations.locateanything.detect import detect_boxes, _nms_boxes
+
+    min_box_area = int(la_cfg.get("min_mask_area", 1600))
+    nms_iou = float(la_cfg.get("nms_iou", 0.5))
+    all_labels, all_boxes = [], []
+    for cats in _la_category_passes(la_cfg):
+        labels, boxes = detect_boxes(
+            image_pil,
+            categories=cats,
+            device=device,
+            model_path=la_cfg.get("model_path"),
+            generation_mode=la_cfg.get("generation_mode", "hybrid"),
+            allowed_categories=None,
+            min_box_area=min_box_area,
+            nms_iou=nms_iou,
+        )
+        if not boxes:
+            continue
+        # Single-class pass: assign that class when LA falls back to "object".
+        if cats is not None and len(cats) == 1:
+            only = str(cats[0]).strip().lower()
+            labels = [only if _normalize_label(l) == "object" else l for l in labels]
+        all_labels.extend(labels)
+        all_boxes.extend(boxes)
+    if not all_boxes:
+        return [], []
+    boxes, labels = _nms_boxes(all_boxes, all_labels, iou_threshold=nms_iou)
+    return labels, boxes
+
+
+def _locateanything_boxes_then_crop_oneformer(image_pil, image_np, seg_cfg, only_foreground=True):
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     la_cfg = _seg_get(seg_cfg, "locateanything", {}) or {}
     if hasattr(la_cfg, "items") and not isinstance(la_cfg, dict):
@@ -290,23 +342,10 @@ def _locateanything_boxes_then_crop_oneformer(image_pil, image_np, seg_cfg, only
     elif not isinstance(la_cfg, dict):
         la_cfg = {}
 
-    categories = la_cfg.get("categories")
-    if categories is not None:
-        categories = list(categories)
-
     pad_ratio = float(_seg_get(seg_cfg, "crop_refinement_pad", 0.15))
     min_component = int(_seg_get(seg_cfg, "crop_refinement_min_area", 400))
 
-    labels, boxes = detect_boxes(
-        image_pil,
-        categories=categories,
-        device=device,
-        model_path=la_cfg.get("model_path"),
-        generation_mode=la_cfg.get("generation_mode", "hybrid"),
-        # Allow LA raw names; map + filter to taxonomy below.
-        allowed_categories=None,
-        min_box_area=int(la_cfg.get("min_mask_area", 1600)),
-    )
+    labels, boxes = _detect_boxes_multipass(image_pil, la_cfg, device)
     from integrations.locateanything.detect import release_worker
 
     release_worker()
@@ -322,6 +361,9 @@ def _locateanything_boxes_then_crop_oneformer(image_pil, image_np, seg_cfg, only
 
     for box, label in zip(boxes, labels):
         mapped = _map_detection_label(label, label_map)
+        # Unlabeled fallback boxes: keep as car so person/vehicle recall is not dropped.
+        if _normalize_label(mapped) == "object":
+            mapped = "vehicle_sedancar"
         if allowed is not None and _normalize_label(mapped) not in allowed:
             continue
         of_hint = _oneformer_hint_from_label(mapped)
@@ -412,38 +454,36 @@ def _model_segment_image(image_pil, image_np, seg_cfg, only_foreground=True):
             la_cfg = OmegaConf.to_container(la_cfg, resolve=True) or {}
         elif not isinstance(la_cfg, dict):
             la_cfg = {}
-        categories = la_cfg.get("categories")
-        if categories is not None:
-            categories = list(categories)
-        masks, labels, _boxes = run_locateanything(
-            image_pil,
-            categories=categories,
-            device=device,
-            model_path=la_cfg.get("model_path"),
-            generation_mode=la_cfg.get("generation_mode", "hybrid"),
-            allowed_categories=None,
-            min_mask_area=int(la_cfg.get("min_mask_area", 1600)),
-        )
+        labels, boxes = _detect_boxes_multipass(image_pil, la_cfg, device)
+        from integrations.locateanything.detect import release_worker
+
+        release_worker()
+        h, w = image_np.shape[:2]
+        if not boxes:
+            return np.zeros((0, h, w), dtype=bool), [], []
+        from integrations.locateanything.detect import _box_to_mask
+
+        masks = [_box_to_mask(b, h, w) for b in boxes]
         label_map = _label_map_from_cfg(seg_cfg)
         allowed = _allowed_categories(seg_cfg)
-        if labels:
-            mapped_labels = []
-            keep_idx = []
-            for i, lab in enumerate(labels):
-                mapped = _map_detection_label(lab, label_map)
-                if allowed is not None and _normalize_label(mapped) not in allowed:
-                    continue
-                mapped_labels.append(mapped)
-                keep_idx.append(i)
-            if keep_idx:
-                masks = np.asarray(masks)[keep_idx]
-                labels = mapped_labels
-                _boxes = [_boxes[i] for i in keep_idx] if _boxes else _boxes
-            else:
-                h, w = image_np.shape[:2]
-                masks = np.zeros((0, h, w), dtype=bool)
-                labels = []
-                _boxes = []
+        mapped_labels = []
+        keep_idx = []
+        for i, lab in enumerate(labels):
+            mapped = _map_detection_label(lab, label_map)
+            if _normalize_label(mapped) == "object":
+                mapped = "vehicle_sedancar"
+            if allowed is not None and _normalize_label(mapped) not in allowed:
+                continue
+            mapped_labels.append(mapped)
+            keep_idx.append(i)
+        if keep_idx:
+            masks = np.asarray(masks)[keep_idx]
+            labels = mapped_labels
+            _boxes = [boxes[i] for i in keep_idx]
+        else:
+            masks = np.zeros((0, h, w), dtype=bool)
+            labels = []
+            _boxes = []
     else:
         raise ValueError(
             f"Unsupported segmentation.holistic='{holistic}'. "
@@ -633,9 +673,12 @@ if __name__ == "__main__":
             label = label.replace(" (", ", ").replace(")", "")
             obj_id = f"{j}_{label.replace(' ', '_')}"
 
-            mask = binary_opening(masks[j], np.ones((7, 7)))
-            if mask.sum() < 6400:
-                print(f"Skipped too small object: {obj_id}")
+            mask = binary_opening(masks[j], np.ones((3, 3)))
+            # Prefer config threshold; default was historically 6400 and dropped
+            # most distant pedestrians / small vehicles in surround views.
+            min_crop_area = int(_seg_get(seg_cfg, "min_crop_mask_area", 400))
+            if mask.sum() < min_crop_area:
+                print(f"Skipped too small object: {obj_id} area={int(mask.sum())} < {min_crop_area}")
                 continue
             ys, xs = np.where(mask)
             if ys.size == 0 or xs.size == 0:
